@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "blockblitz",
+      "runtimeExecutable": "dotnet",
+      "runtimeArgs": ["run", "--project", "server", "--no-launch-profile", "--", "--urls", "http://0.0.0.0:8080"],
+      "port": 8080,
+      "url": "http://localhost:8080"
+    }
+  ]
+}

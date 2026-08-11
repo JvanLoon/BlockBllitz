@@ -1,0 +1,15 @@
+# .NET build output
+bin/
+obj/
+
+# User-specific / IDE
+.vs/
+*.user
+*.suo
+
+# Rider
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BlockBlitz</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0b12; }
+    #renderCanvas { width: 100%; height: 100%; display: block; touch-action: none; outline: none; }
+
+    /* Crosshair */
+    #crosshair {
+      position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+      width: 18px; height: 18px; pointer-events: none;
+    }
+    #crosshair::before, #crosshair::after {
+      content: ""; position: absolute; background: rgba(255,255,255,0.8);
+    }
+    #crosshair::before { left: 8px; top: 0; width: 2px; height: 18px; }
+    #crosshair::after  { top: 8px; left: 0; height: 2px; width: 18px; }
+
+    #hud {
+      position: fixed; left: 12px; bottom: 12px; color: #cfe3ff;
+      font: 13px/1.5 ui-monospace, Consolas, monospace; pointer-events: none;
+      text-shadow: 0 1px 2px #000;
+    }
+    #overlay {
+      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+      background: rgba(6,6,14,0.75); color: #e8f0ff; cursor: pointer;
+      font: 600 20px/1.5 system-ui, sans-serif; text-align: center; z-index: 10;
+    }
+    #overlay small { display: block; margin-top: 10px; font-weight: 400; color: #9fb4d6; font-size: 14px; }
+    .hidden { display: none !important; }
+    #title { position: fixed; left: 12px; top: 10px; color: #7fd7ff; font: 700 18px system-ui, sans-serif; letter-spacing: 1px; text-shadow: 0 1px 2px #000; }
+  </style>
+</head>
+<body>
+  <canvas id="renderCanvas"></canvas>
+  <div id="title">BLOCKBLITZ</div>
+  <div id="crosshair" class="hidden"></div>
+  <div id="hud"></div>
+  <div id="overlay">
+    Click to play
+    <small>WASD to move &nbsp;·&nbsp; mouse to look &nbsp;·&nbsp; Esc to release</small>
+  </div>
+
+  <!-- Babylon.js core + materials (GridMaterial) from CDN -->
+  <script src="https://cdn.babylonjs.com/babylon.js"></script>
+  <script src="https://cdn.babylonjs.com/materialsLibrary/babylonjs.materials.min.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>
