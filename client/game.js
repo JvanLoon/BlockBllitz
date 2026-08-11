@@ -97,7 +97,11 @@ let myAlive = true;
 let lastShotAt = 0;   // cosmetic tracer cadence (ms)
 const FIRE_MS = 120;  // matches the server's fire interval
 
-canvas.addEventListener("click", () => canvas.requestPointerLock());
+// Request pointer lock on any click while unlocked. Listening on the document (not just the
+// canvas) means clicks land even when the "Click to play" overlay is covering the canvas.
+document.addEventListener("click", () => {
+  if (document.pointerLockElement !== canvas) canvas.requestPointerLock();
+});
 document.addEventListener("pointerlockchange", () => {
   pointerLocked = document.pointerLockElement === canvas;
   overlay.classList.toggle("hidden", pointerLocked);
