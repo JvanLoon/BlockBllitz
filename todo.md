@@ -15,7 +15,7 @@ bolt-on later instead of a rewrite.
 - [x] Lock stack: Babylon.js client + ASP.NET Core raw-WebSocket server, JSON messages, authoritative
 - [x] Create project structure (`/server`, `/client`)
 - [x] Name the game: **BlockBlitz**
-- [ ] `git init` (memory workflow: commit, never push — user pushes from Windows)
+- [x] `git init` + initial commit (workflow: commit, never push — user pushes from Windows)
 - [x] Pick server tick rate (60 Hz sim) and network send rate (30 Hz broadcast)
 
 ## Phase 1 — Walking skeleton (two tabs moving on LAN)  ✅ DONE
@@ -43,7 +43,9 @@ bolt-on later instead of a rewrite.
 - [ ] Weapon model with fire rate, reload, ammo count
 
 ## Phase 4 — Netcode quality (DO BEFORE going live over the tunnel)
-> Not needed on LAN (~0 latency). Required once real ping appears over the tunnel.
+> Not needed on LAN (~0 latency) for *responsiveness*. But note *smoothness* (high-refresh
+> display vs low network rate) shows up even on LAN — see the strafe-judder issue.
+> Interim mitigation applied: broadcast bumped to 60Hz. Real fix is prediction + interpolation below.
 - [ ] Client-side prediction of own movement
 - [ ] Server reconciliation (correct client when it mispredicts)
 - [ ] Entity interpolation for other players (render slightly in the past, smooth)

@@ -15,7 +15,10 @@ namespace BlockBlitz.Server;
 public sealed class GameServer : BackgroundService
 {
     public const int TickRate = 60;   // simulation steps per second
-    public const int SendRate = 30;   // state broadcasts per second
+    // Interim smoothing measure: broadcast every tick (60Hz) to cut the strafe judder on
+    // high-refresh displays. The real fix is client-side prediction + interpolation (Phase 4);
+    // once that lands this can drop back to ~30Hz to save bandwidth.
+    public const int SendRate = 60;   // state broadcasts per second
 
     private const float MoveSpeed = 6f;    // world units per second
     private const float ArenaHalf = 19f;   // arena is 40x40, keep players just inside
