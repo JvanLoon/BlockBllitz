@@ -37,12 +37,15 @@ bolt-on later instead of a rewrite.
 - [x] HUD: health  (ammo deferred to Phase 3 — it belongs with the weapon/reload model)
 - [x] Verify: 4 hits down a target, victim sees ELIMINATED overlay, respawns to full (cross-tab)
 
-## Phase 3 — Make it a game
-- [ ] Arena with cover boxes + server-side AABB/capsule collision
-- [ ] Spawn points
-- [ ] Player names
-- [ ] Scoreboard / kill tracking
-- [ ] Weapon model with fire rate, reload, ammo count
+## Phase 3 — Make it a game  ✅ DONE
+- [x] Arena with cover boxes + server-side collision (7 obstacles, axis-separated slide;
+      single source of truth in Arena.cs, sent to clients in welcome). Hitscan blocked by walls.
+- [x] Spawn points (8 points; pick farthest from live enemies, random tie-break)
+- [x] Player names (join message; default Blitzer-xxxx; floating name tags + persisted locally)
+- [x] Scoreboard / kill tracking (hold Tab; kills/deaths, sorted; live)
+- [x] Weapon model: gun viewmodel w/ recoil, 30-round mag, ~0.12s fire, 1.6s reload (R or auto), ammo HUD
+- [x] Verify (cross-tab): never penetrates cover; shots blocked by wall (0 hits) but land with clear LOS;
+      ammo 30→0→reload→30; kills/deaths increment; names + tags propagate
 
 ## Phase 4 — Netcode quality (DO BEFORE going live over the tunnel)
 > Not needed on LAN (~0 latency) for *responsiveness*. But note *smoothness* (high-refresh

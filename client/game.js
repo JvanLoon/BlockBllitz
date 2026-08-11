@@ -48,10 +48,44 @@ const pillarColors = [
   p.material = m;
 });
 
+// ---- Weapon viewmodel -----------------------------------------------------
+
+const gun = BABYLON.MeshBuilder.CreateBox("gun", { width: 0.12, height: 0.14, depth: 0.5 }, scene);
+gun.parent = camera;
+const GUN_BASE = new BABYLON.Vector3(0.22, -0.2, 0.6);
+gun.position.copyFrom(GUN_BASE);
+const gunMat = new BABYLON.StandardMaterial("gunMat", scene);
+gunMat.diffuseColor = new BABYLON.Color3(0.12, 0.13, 0.16);
+gunMat.emissiveColor = new BABYLON.Color3(0.04, 0.04, 0.05);
+gun.material = gunMat;
+gun.isPickable = false;
+gun.renderingGroupId = 1; // draw over the world so it never clips into cover
+let recoil = 0;           // 0..1, decays each frame
+
+// ---- Arena cover (sent by the server) -------------------------------------
+
+const obstacleMeshes = [];
+function buildObstacles(list) {
+  for (const m of obstacleMeshes) m.dispose();
+  obstacleMeshes.length = 0;
+  const mat = new BABYLON.StandardMaterial("coverMat", scene);
+  mat.diffuseColor = new BABYLON.Color3(0.22, 0.25, 0.32);
+  mat.emissiveColor = new BABYLON.Color3(0.05, 0.06, 0.08);
+  for (const o of list) {
+    const box = BABYLON.MeshBuilder.CreateBox("cover", { width: o.hx * 2, depth: o.hz * 2, height: o.h }, scene);
+    box.position.set(o.x, o.h / 2, o.z);
+    box.material = mat;
+    box.isPickable = false;
+    obstacleMeshes.push(box);
+  }
+}
+
 // ---- Player meshes --------------------------------------------------------
 
 /** @type {Map<string, BABYLON.Mesh>} id -> box mesh for other players */
 const others = new Map();
+/** @type {Map<string, HTMLElement>} id -> floating name tag */
+const tags = new Map();
 
 function makePlayerBox(id) {
   const box = BABYLON.MeshBuilder.CreateBox("p_" + id, { width: 0.8, depth: 0.8, height: 1.0 }, scene);
@@ -89,26 +123,81 @@ const healthEl = document.getElementById("health");
 const hpSpan = healthEl.querySelector(".hp");
 const damageEl = document.getElementById("damage");
 const deathEl = document.getElementById("death");
+const nameInput = document.getElementById("nameInput");
+const ammoEl = document.getElementById("ammo");
+const ammoCur = ammoEl.querySelector(".cur");
+const ammoMag = ammoEl.querySelector(".mag");
+const scoreboard = document.getElementById("scoreboard");
+const scoreboardBody = scoreboard.querySelector("tbody");
 
 let pointerLocked = false;
-let firing = false;   // left mouse held
+let firing = false;      // left mouse held
 let myHp = 100;
 let myAlive = true;
-let lastShotAt = 0;   // cosmetic tracer cadence (ms)
-const FIRE_MS = 120;  // matches the server's fire interval
+let myReloading = false;
+let magSize = 30;
+let latestPlayers = [];  // last state snapshot, for the scoreboard
+let lastShotAt = 0;      // cosmetic tracer cadence (ms)
+const FIRE_MS = 120;     // matches the server's fire interval
 
-// Request pointer lock on any click while unlocked. Listening on the document (not just the
-// canvas) means clicks land even when the "Click to play" overlay is covering the canvas.
-document.addEventListener("click", () => {
-  if (document.pointerLockElement !== canvas) canvas.requestPointerLock();
+// Restore last-used name.
+nameInput.value = localStorage.getItem("blockblitz-name") || "";
+nameInput.focus();
+
+function startPlaying() {
+  const name = nameInput.value.trim();
+  if (name) localStorage.setItem("blockblitz-name", name);
+  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "join", name }));
+  canvas.requestPointerLock();
+}
+
+// Clicking the overlay anywhere except the name field (incl. the PLAY button) starts/resumes.
+overlay.addEventListener("click", (e) => {
+  if (e.target === nameInput) return; // let them focus/type
+  startPlaying();
 });
+nameInput.addEventListener("keydown", (e) => {
+  e.stopPropagation();               // don't leak typing into movement keys
+  if (e.key === "Enter") startPlaying();
+});
+
 document.addEventListener("pointerlockchange", () => {
   pointerLocked = document.pointerLockElement === canvas;
   overlay.classList.toggle("hidden", pointerLocked);
   crosshair.classList.toggle("hidden", !pointerLocked);
   healthEl.classList.toggle("hidden", !pointerLocked);
-  if (!pointerLocked) firing = false; // don't keep shooting after releasing the mouse
+  ammoEl.classList.toggle("hidden", !pointerLocked);
+  if (!pointerLocked) { firing = false; nameInput.focus(); }
 });
+
+// ---- Scoreboard (hold Tab) ------------------------------------------------
+
+let scoreboardVisible = false;
+window.addEventListener("keydown", (e) => {
+  if (e.code !== "Tab") return;
+  e.preventDefault();
+  if (!scoreboardVisible) { scoreboardVisible = true; scoreboard.classList.remove("hidden"); renderScoreboard(); }
+});
+window.addEventListener("keyup", (e) => {
+  if (e.code !== "Tab") return;
+  e.preventDefault();
+  scoreboardVisible = false;
+  scoreboard.classList.add("hidden");
+});
+
+function renderScoreboard() {
+  const rows = [...latestPlayers].sort((a, b) => b.kills - a.kills || a.deaths - b.deaths);
+  scoreboardBody.innerHTML = "";
+  for (const p of rows) {
+    const tr = document.createElement("tr");
+    if (p.id === myId) tr.className = "me";
+    const name = document.createElement("td"); name.textContent = p.name || p.id;
+    const k = document.createElement("td"); k.className = "c k"; k.textContent = p.kills;
+    const d = document.createElement("td"); d.className = "c d"; d.textContent = p.deaths;
+    tr.append(name, k, d);
+    scoreboardBody.appendChild(tr);
+  }
+}
 
 // Fire while the left button is held (only when locked & alive).
 document.addEventListener("mousedown", (e) => { if (e.button === 0 && pointerLocked) firing = true; });
@@ -139,6 +228,9 @@ ws.addEventListener("message", (ev) => {
     myId = msg.id;
     tickRate = msg.tickRate;
     sendRate = msg.sendRate;
+    magSize = msg.magSize || magSize;
+    ammoMag.textContent = magSize;
+    buildObstacles(msg.obstacles || []);
   } else if (msg.type === "state") {
     applyState(msg);
   } else if (msg.type === "hit") {
@@ -154,6 +246,7 @@ function showHitmarker() {
 }
 
 function applyState(msg) {
+  latestPlayers = msg.players;
   const seen = new Set();
   for (const p of msg.players) {
     seen.add(p.id);
@@ -168,11 +261,29 @@ function applyState(msg) {
     mesh.position.set(p.x, p.y, p.z);
     mesh.rotation.y = p.yaw;
     mesh.setEnabled(p.alive); // dead players vanish until they respawn
+
+    // Name tag (positioned each frame in the render loop).
+    let tag = tags.get(p.id);
+    if (!tag) {
+      tag = document.createElement("div");
+      tag.className = "nametag";
+      document.body.appendChild(tag);
+      tags.set(p.id, tag);
+    }
+    tag.textContent = p.name || "";
+    tag.style.display = p.alive ? "block" : "none";
   }
   // Remove players that left.
   for (const [id, mesh] of others) {
-    if (!seen.has(id)) { mesh.dispose(); others.delete(id); }
+    if (!seen.has(id)) {
+      mesh.dispose();
+      others.delete(id);
+      tags.get(id)?.remove();
+      tags.delete(id);
+    }
   }
+
+  if (scoreboardVisible) renderScoreboard();
 }
 
 function updateSelf(p) {
@@ -183,9 +294,14 @@ function updateSelf(p) {
   }
   myHp = p.hp;
   myAlive = p.alive;
+  myReloading = p.reloading;
 
   hpSpan.textContent = Math.max(0, Math.round(p.hp));
   healthEl.classList.toggle("low", p.hp <= 30);
+
+  ammoCur.textContent = p.ammo;
+  ammoEl.classList.toggle("empty", p.ammo === 0);
+  ammoEl.classList.toggle("reloading", p.reloading);
 
   deathEl.classList.toggle("hidden", p.alive);
   crosshair.classList.toggle("hidden", !p.alive || !pointerLocked);
@@ -194,23 +310,26 @@ function updateSelf(p) {
 // Send our input at the server's send rate (enough to be responsive without spamming).
 setInterval(() => {
   if (ws.readyState !== WebSocket.OPEN) return;
+  const active = pointerLocked;                       // only control the player while locked
   const shooting = firing && pointerLocked && myAlive;
   ws.send(JSON.stringify({
     type: "input",
-    fwd: !!keys["KeyW"],
-    back: !!keys["KeyS"],
-    left: !!keys["KeyA"],
-    right: !!keys["KeyD"],
+    fwd: active && !!keys["KeyW"],
+    back: active && !!keys["KeyS"],
+    left: active && !!keys["KeyA"],
+    right: active && !!keys["KeyD"],
     fire: shooting,
+    reload: active && !!keys["KeyR"],
     yaw,
     pitch,
   }));
 
-  // Cosmetic only: spawn a tracer at roughly the server fire rate (the server is authoritative
-  // for actual hits). Predicting the cadence locally keeps the feedback instant.
-  if (shooting && performance.now() - lastShotAt >= FIRE_MS) {
+  // Cosmetic only: spawn a tracer + recoil at roughly the server fire rate (the server is
+  // authoritative for actual hits). Predicting the cadence locally keeps the feedback instant.
+  if (shooting && !myReloading && performance.now() - lastShotAt >= FIRE_MS) {
     lastShotAt = performance.now();
     spawnTracer();
+    recoil = 1;
   }
 }, 1000 / 60);
 
@@ -238,11 +357,40 @@ const hud = document.getElementById("hud");
 engine.runRenderLoop(() => {
   // Looking is local & instant. Babylon UniversalCamera uses Euler (pitch, yaw, roll).
   camera.rotation.set(pitch, yaw, 0);
+
+  // Weapon viewmodel: recoil kick decays back to rest; dip while reloading.
+  recoil += (0 - recoil) * 0.25;
+  const dip = myReloading ? 0.18 : 0;
+  gun.position.set(GUN_BASE.x, GUN_BASE.y - dip, GUN_BASE.z - recoil * 0.12);
+  gun.rotation.set(-recoil * 0.5 + dip * 1.2, 0, 0);
+
   scene.render();
+  updateNametags();
 
   hud.textContent =
-    `${connected ? "online" : "offline"} · id ${myId ?? "…"} · ` +
-    `players ${others.size + (myId ? 1 : 0)} · ${engine.getFps().toFixed(0)} fps`;
+    `${connected ? "online" : "offline"} · ${others.size + (myId ? 1 : 0)} players · ${engine.getFps().toFixed(0)} fps`;
 });
+
+// Project each visible player's head position to screen space and place its name tag there.
+function updateNametags() {
+  const rect = canvas.getBoundingClientRect();
+  const viewport = new BABYLON.Viewport(0, 0, rect.width, rect.height);
+  const transform = scene.getTransformMatrix();
+  const forward = camera.getDirection(BABYLON.Axis.Z);
+  for (const [id, mesh] of others) {
+    const tag = tags.get(id);
+    if (!tag || tag.style.display === "none") continue;
+    const head = new BABYLON.Vector3(mesh.position.x, mesh.position.y + 1.1, mesh.position.z);
+    // Hide when behind the camera.
+    if (BABYLON.Vector3.Dot(head.subtract(camera.position), forward) <= 0) {
+      tag.style.visibility = "hidden";
+      continue;
+    }
+    const c = BABYLON.Vector3.Project(head, BABYLON.Matrix.Identity(), transform, viewport);
+    tag.style.visibility = "visible";
+    tag.style.left = (rect.left + c.x) + "px";
+    tag.style.top = (rect.top + c.y) + "px";
+  }
+}
 
 window.addEventListener("resize", () => engine.resize());

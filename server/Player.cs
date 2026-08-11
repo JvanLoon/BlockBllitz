@@ -21,11 +21,19 @@ public sealed class Player
     public float Yaw;
     public float Pitch;
 
+    // Identity / scoring.
+    public string Name = "";
+    public int Kills;
+    public int Deaths;
+
     // Combat state (owned by the tick loop).
     public float Health = 100f;
     public bool Alive = true;
-    public uint NextShotTick;   // earliest tick this player may fire again
-    public uint RespawnTick;    // tick at which a dead player respawns
+    public int Ammo = 30;
+    public bool Reloading;
+    public uint ReloadDoneTick;  // tick a reload completes
+    public uint NextShotTick;    // earliest tick this player may fire again
+    public uint RespawnTick;     // tick at which a dead player respawns
 
     private InputMessage _latest = InputMessage.Empty;
 

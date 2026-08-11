@@ -68,6 +68,56 @@
       font: 800 40px system-ui, sans-serif; letter-spacing: 2px; pointer-events: none; z-index: 8;
     }
     #death small { margin-top: 12px; font: 500 16px system-ui, sans-serif; color: #ffb3b3; letter-spacing: 0; }
+
+    /* Start panel (name + play) */
+    #overlay .panel {
+      display: flex; flex-direction: column; align-items: center; gap: 12px;
+      background: rgba(12,14,24,0.92); padding: 26px 34px; border: 1px solid #21304a; border-radius: 14px;
+    }
+    #overlay label { font: 600 12px system-ui, sans-serif; letter-spacing: 2px; color: #7f9bc4; }
+    #overlay input {
+      width: 220px; padding: 10px 12px; font: 600 18px system-ui, sans-serif; text-align: center;
+      color: #eaf2ff; background: #0b1020; border: 1px solid #2b3d5c; border-radius: 8px; outline: none;
+    }
+    #overlay input:focus { border-color: #4f8fff; }
+    #overlay #playBtn {
+      margin-top: 2px; padding: 10px 44px; font: 800 18px system-ui, sans-serif; letter-spacing: 2px;
+      color: #04121f; background: #5fd0ff; border: none; border-radius: 8px; cursor: pointer;
+    }
+    #overlay #playBtn:hover { background: #8adcff; }
+    #overlay small { font: 500 13px system-ui, sans-serif; color: #8ea3c4; letter-spacing: 0; }
+
+    /* Ammo, bottom-right */
+    #ammo {
+      position: fixed; right: 18px; bottom: 14px; font: 800 26px ui-monospace, Consolas, monospace;
+      color: #eafff0; text-shadow: 0 2px 4px #000; pointer-events: none;
+    }
+    #ammo .cur { color: #ffd36b; }
+    #ammo.empty .cur { color: #ff5d5d; }
+    #ammo .reloading { display: none; color: #ffb45d; font-size: 17px; }
+    #ammo.reloading .clip { display: none; }
+    #ammo.reloading .reloading { display: inline; }
+
+    /* Scoreboard (hold Tab) */
+    #scoreboard {
+      position: fixed; left: 50%; top: 60px; transform: translateX(-50%);
+      background: rgba(8,10,18,0.93); border: 1px solid #263650; border-radius: 10px;
+      padding: 10px 6px; min-width: 320px; pointer-events: none;
+    }
+    #scoreboard table { border-collapse: collapse; width: 100%; color: #dbe7ff; font: 14px system-ui, sans-serif; }
+    #scoreboard th, #scoreboard td { padding: 4px 18px; text-align: left; }
+    #scoreboard th { color: #7f9bc4; font-weight: 600; border-bottom: 1px solid #263650; }
+    #scoreboard th.c, #scoreboard td.c { text-align: center; }
+    #scoreboard td.k { color: #6bff9e; }
+    #scoreboard td.d { color: #ff8a8a; }
+    #scoreboard tr.me td { color: #ffe38a; }
+
+    /* Floating name tags (positioned in JS) */
+    .nametag {
+      position: fixed; transform: translate(-50%, -100%); padding: 1px 6px;
+      font: 600 12px system-ui, sans-serif; color: #eaf2ff; background: rgba(6,10,20,0.6);
+      border-radius: 6px; pointer-events: none; white-space: nowrap; text-shadow: 0 1px 2px #000;
+    }
   </style>
 </head>
 <body>
@@ -77,11 +127,22 @@
   <div id="crosshair" class="hidden"></div>
   <div id="hitmarker"></div>
   <div id="health" class="hidden">HP <span class="hp">100</span></div>
+  <div id="ammo" class="hidden"><span class="clip"><span class="cur">30</span>/<span class="mag">30</span></span><span class="reloading">RELOADING…</span></div>
   <div id="hud"></div>
+  <div id="scoreboard" class="hidden">
+    <table>
+      <thead><tr><th>Player</th><th class="c">K</th><th class="c">D</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
   <div id="death" class="hidden">ELIMINATED<small>respawning…</small></div>
   <div id="overlay">
-    Click to play
-    <small>WASD to move &nbsp;·&nbsp; mouse to look &nbsp;·&nbsp; click to shoot &nbsp;·&nbsp; Esc to release</small>
+    <div class="panel">
+      <label for="nameInput">YOUR NAME</label>
+      <input id="nameInput" maxlength="16" autocomplete="off" spellcheck="false" placeholder="Blitzer" />
+      <button id="playBtn">PLAY</button>
+      <small>WASD move · mouse look · click shoot · R reload · Tab scores · Esc release</small>
+    </div>
   </div>
 
   <!-- Babylon.js core + materials (GridMaterial) from CDN -->

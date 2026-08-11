@@ -31,6 +31,11 @@ public sealed class GameServer : BackgroundService
     private const int FireIntervalTicks = 7;   // ~0.12s between shots at 60Hz
     private static readonly int RespawnDelayTicks = TickRate * 2; // 2s
 
+    private const int MagSize = 30;
+    private static readonly int ReloadTicks = (int)(TickRate * 1.6f); // 1.6s reload
+
+    private const float PlayerRadius = 0.4f;   // used for obstacle collision
+
     // Player hit box: axis-aligned, matching the 0.8 x 1.0 x 0.8 client box (centred at y=0.5).
     private const float BoxHalfXZ = 0.4f;
     private const float BoxBottom = 0f;
@@ -58,19 +63,24 @@ public sealed class GameServer : BackgroundService
             Id = Guid.NewGuid().ToString("N")[..8],
             Socket = socket,
         };
-        // Random spawn so two players don't stack on the origin.
-        var rng = Random.Shared;
-        player.X = (rng.NextSingle() * 2f - 1f) * 8f;
-        player.Z = (rng.NextSingle() * 2f - 1f) * 8f;
+        player.Name = "Blitzer-" + player.Id[..4];
+        Spawn(player);
 
         // Send the welcome BEFORE registering the player, so this send can't race with the
-        // tick loop's broadcasts (which only touch registered players).
+        // tick loop's broadcasts (which only touch registered players). Includes the arena
+        // layout so the client renders identical cover.
         await SendJson(socket, new
         {
             type = "welcome",
             id = player.Id,
             tickRate = TickRate,
             sendRate = SendRate,
+            magSize = MagSize,
+            arenaHalf = ArenaHalf,
+            obstacles = Arena.Obstacles.Select(o => new
+            {
+                x = o.X, z = o.Z, hx = o.HalfX, hz = o.HalfZ, h = o.Height,
+            }).ToArray(),
         }, ct);
 
         _players[player.Id] = player;
@@ -104,11 +114,36 @@ public sealed class GameServer : BackgroundService
 
             try
             {
-                var input = JsonSerializer.Deserialize<InputMessage>(text, Json);
-                if (input is not null) player.Latest = input;
+                using var doc = JsonDocument.Parse(text);
+                var type = doc.RootElement.TryGetProperty("type", out var tp) ? tp.GetString() : null;
+
+                if (type == "join")
+                {
+                    if (doc.RootElement.TryGetProperty("name", out var nm))
+                    {
+                        var name = Sanitize(nm.GetString());
+                        if (name.Length > 0) player.Name = name;
+                    }
+                }
+                else
+                {
+                    var input = JsonSerializer.Deserialize<InputMessage>(text, Json);
+                    if (input is not null) player.Latest = input;
+                }
             }
-            catch (JsonException) { /* ignore malformed input */ }
+            catch (JsonException) { /* ignore malformed message */ }
         }
+    }
+
+    private static string Sanitize(string? s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return "";
+        var t = s.Trim();
+        if (t.Length > 16) t = t[..16];
+        var sb = new StringBuilder(t.Length);
+        foreach (var c in t)
+            if (!char.IsControl(c)) sb.Append(c);
+        return sb.ToString();
     }
 
     /// <summary>Reads one full text message, reassembling fragments if needed.</summary>
@@ -173,16 +208,29 @@ public sealed class GameServer : BackgroundService
             // Respawn timer for the dead.
             if (!p.Alive)
             {
-                if (_tick >= p.RespawnTick) Respawn(p);
+                if (_tick >= p.RespawnTick) Spawn(p);
                 continue;
             }
 
             MovePlayer(p, inp, dt);
 
-            // Firing: server owns the fire-rate cooldown so clients can't out-shoot it.
-            if (inp.Fire && _tick >= p.NextShotTick)
+            // Reloading (server-authoritative): finish an in-progress reload, or start one when
+            // requested (or automatically when trying to fire on empty) and the mag isn't full.
+            if (p.Reloading)
+            {
+                if (_tick >= p.ReloadDoneTick) { p.Ammo = MagSize; p.Reloading = false; }
+            }
+            else if ((inp.Reload || (inp.Fire && p.Ammo == 0)) && p.Ammo < MagSize)
+            {
+                p.Reloading = true;
+                p.ReloadDoneTick = _tick + (uint)ReloadTicks;
+            }
+
+            // Firing: server owns the fire-rate cooldown and ammo so clients can't cheat either.
+            if (inp.Fire && !p.Reloading && p.Ammo > 0 && _tick >= p.NextShotTick)
             {
                 p.NextShotTick = _tick + (uint)FireIntervalTicks;
+                p.Ammo--;
                 if (TryHitscan(p, out var target))
                 {
                     target.Health -= ShotDamage;
@@ -191,7 +239,9 @@ public sealed class GameServer : BackgroundService
                     {
                         target.Alive = false;
                         target.RespawnTick = _tick + (uint)RespawnDelayTicks;
-                        _log.LogInformation("Player {Killer} killed {Victim}", p.Id, target.Id);
+                        p.Kills++;
+                        target.Deaths++;
+                        _log.LogInformation("{Killer} killed {Victim}", p.Name, target.Name);
                     }
                 }
             }
@@ -213,17 +263,53 @@ public sealed class GameServer : BackgroundService
         float len = MathF.Sqrt(dx * dx + dz * dz);
         dx /= len; dz /= len;
 
-        p.X = Math.Clamp(p.X + dx * MoveSpeed * dt, -ArenaHalf, ArenaHalf);
-        p.Z = Math.Clamp(p.Z + dz * MoveSpeed * dt, -ArenaHalf, ArenaHalf);
+        // Axis-separated resolution so players slide along cover instead of sticking.
+        float nx = Math.Clamp(p.X + dx * MoveSpeed * dt, -ArenaHalf, ArenaHalf);
+        if (!BlockedAt(nx, p.Z)) p.X = nx;
+        float nz = Math.Clamp(p.Z + dz * MoveSpeed * dt, -ArenaHalf, ArenaHalf);
+        if (!BlockedAt(p.X, nz)) p.Z = nz;
     }
 
-    private void Respawn(Player p)
+    /// <summary>True if a player centred at (x,z) would overlap any obstacle (inflated by radius).</summary>
+    private static bool BlockedAt(float x, float z)
     {
-        var rng = Random.Shared;
-        p.X = (rng.NextSingle() * 2f - 1f) * 15f;
-        p.Z = (rng.NextSingle() * 2f - 1f) * 15f;
+        foreach (var o in Arena.Obstacles)
+        {
+            if (x > o.X - o.HalfX - PlayerRadius && x < o.X + o.HalfX + PlayerRadius &&
+                z > o.Z - o.HalfZ - PlayerRadius && z < o.Z + o.HalfZ + PlayerRadius)
+                return true;
+        }
+        return false;
+    }
+
+    private void Spawn(Player p)
+    {
+        var (sx, sz) = PickSpawn(p);
+        p.X = sx; p.Z = sz;
         p.Health = MaxHealth;
+        p.Ammo = MagSize;
+        p.Reloading = false;
         p.Alive = true;
+    }
+
+    /// <summary>Pick the spawn point(s) farthest from any other alive player, breaking ties randomly.</summary>
+    private (float X, float Z) PickSpawn(Player self)
+    {
+        float best = -1f;
+        var candidates = new List<(float, float)>();
+        foreach (var sp in Arena.SpawnPoints)
+        {
+            float nearestSq = float.MaxValue;
+            foreach (var q in _players.Values)
+            {
+                if (ReferenceEquals(q, self) || !q.Alive) continue;
+                float ddx = q.X - sp.X, ddz = q.Z - sp.Z;
+                nearestSq = MathF.Min(nearestSq, ddx * ddx + ddz * ddz);
+            }
+            if (nearestSq > best + 0.01f) { best = nearestSq; candidates.Clear(); candidates.Add(sp); }
+            else if (nearestSq >= best - 0.01f) { candidates.Add(sp); }
+        }
+        return candidates[Random.Shared.Next(candidates.Count)];
     }
 
     /// <summary>
@@ -240,7 +326,17 @@ public sealed class GameServer : BackgroundService
         float dx = cp * sy, dy = -sp, dz = cp * cy;
 
         float ox = shooter.X, oy = EyeHeight, oz = shooter.Z;
+
+        // A shot can't pass through cover: the nearest wall along the ray caps the reach.
         float best = ShotRange;
+        foreach (var o in Arena.Obstacles)
+        {
+            if (RayAabb(ox, oy, oz, dx, dy, dz,
+                        o.X - o.HalfX, 0f, o.Z - o.HalfZ,
+                        o.X + o.HalfX, o.Height, o.Z + o.HalfZ,
+                        out float wd) && wd < best)
+                best = wd;
+        }
 
         foreach (var t in _players.Values)
         {
@@ -251,7 +347,7 @@ public sealed class GameServer : BackgroundService
                         t.X + BoxHalfXZ, BoxTop, t.Z + BoxHalfXZ,
                         out float dist) && dist < best)
             {
-                best = dist;
+                best = dist;   // closer players also occlude players behind them
                 hit = t;
             }
         }
@@ -314,9 +410,12 @@ public sealed class GameServer : BackgroundService
             players = _players.Values.Select(p => new
             {
                 id = p.Id,
+                name = p.Name,
                 x = p.X, y = p.Y, z = p.Z,
                 yaw = p.Yaw, pitch = p.Pitch,
                 hp = p.Health, alive = p.Alive,
+                ammo = p.Ammo, reloading = p.Reloading,
+                kills = p.Kills, deaths = p.Deaths,
             }).ToArray(),
         };
 
