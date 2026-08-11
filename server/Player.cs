@@ -17,9 +17,15 @@ public sealed class Player
     public float Y = 0.5f;
     public float Z;
 
-    // Orientation the player last reported (used for movement direction and, later, aiming).
+    // Orientation the player last reported (used for movement direction and aiming).
     public float Yaw;
     public float Pitch;
+
+    // Combat state (owned by the tick loop).
+    public float Health = 100f;
+    public bool Alive = true;
+    public uint NextShotTick;   // earliest tick this player may fire again
+    public uint RespawnTick;    // tick at which a dead player respawns
 
     private InputMessage _latest = InputMessage.Empty;
 

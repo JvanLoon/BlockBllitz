@@ -29,11 +29,13 @@ bolt-on later instead of a rewrite.
 - [x] Verify: two browser tabs move independently, cross-client propagation, clean join/leave
       (movement confirmed server-authoritative at 6 u/s; disconnect removes the box)
 
-## Phase 2 — Combat
-- [ ] Fire input + server-side **hitscan raycast** (shooter's view ray vs player capsules)
-- [ ] Health, damage, death, respawn
-- [ ] Crosshair + hitmarker + damage feedback on client
-- [ ] HUD: health, ammo
+## Phase 2 — Combat  ✅ DONE
+- [x] Fire input + server-side **hitscan raycast** (ray-vs-AABB; server owns fire-rate cooldown)
+      25 dmg/shot, ~0.12s fire interval, 100u range; skips dead/self
+- [x] Health, damage, death, respawn (100 HP, death at 0, 2s respawn to a fresh spawn)
+- [x] Crosshair + hitmarker + damage feedback (red flash) + cosmetic tracer on client
+- [x] HUD: health  (ammo deferred to Phase 3 — it belongs with the weapon/reload model)
+- [x] Verify: 4 hits down a target, victim sees ELIMINATED overlay, respawns to full (cross-tab)
 
 ## Phase 3 — Make it a game
 - [ ] Arena with cover boxes + server-side AABB/capsule collision

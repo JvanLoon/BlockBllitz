@@ -32,16 +32,55 @@
     #overlay small { display: block; margin-top: 10px; font-weight: 400; color: #9fb4d6; font-size: 14px; }
     .hidden { display: none !important; }
     #title { position: fixed; left: 12px; top: 10px; color: #7fd7ff; font: 700 18px system-ui, sans-serif; letter-spacing: 1px; text-shadow: 0 1px 2px #000; }
+
+    /* Hitmarker: four short red ticks flashed around the crosshair on a confirmed hit. */
+    #hitmarker {
+      position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%) rotate(45deg);
+      width: 22px; height: 22px; pointer-events: none; opacity: 0; transition: opacity 60ms linear;
+    }
+    #hitmarker.show { opacity: 1; }
+    #hitmarker::before, #hitmarker::after { content: ""; position: absolute; background: #ff4d4d; }
+    #hitmarker::before { left: 10px; top: 0; width: 2px; height: 22px; }
+    #hitmarker::after  { top: 10px; left: 0; height: 2px; width: 22px; }
+
+    /* Health readout, bottom-centre. */
+    #health {
+      position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
+      color: #eafff0; font: 700 26px ui-monospace, Consolas, monospace;
+      text-shadow: 0 2px 4px #000; pointer-events: none;
+    }
+    #health .hp { color: #6bff9e; }
+    #health.low .hp { color: #ff5d5d; }
+
+    /* Full-screen red flash when you take damage. */
+    #damage {
+      position: fixed; inset: 0; pointer-events: none; opacity: 0;
+      background: radial-gradient(ellipse at center, rgba(255,0,0,0) 40%, rgba(255,0,0,0.55) 100%);
+      transition: opacity 350ms ease-out;
+    }
+    #damage.flash { opacity: 1; transition: opacity 40ms linear; }
+
+    /* Death overlay. */
+    #death {
+      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+      flex-direction: column; background: rgba(30,0,0,0.55); color: #ffdede;
+      font: 800 40px system-ui, sans-serif; letter-spacing: 2px; pointer-events: none; z-index: 8;
+    }
+    #death small { margin-top: 12px; font: 500 16px system-ui, sans-serif; color: #ffb3b3; letter-spacing: 0; }
   </style>
 </head>
 <body>
   <canvas id="renderCanvas"></canvas>
   <div id="title">BLOCKBLITZ</div>
+  <div id="damage"></div>
   <div id="crosshair" class="hidden"></div>
+  <div id="hitmarker"></div>
+  <div id="health" class="hidden">HP <span class="hp">100</span></div>
   <div id="hud"></div>
+  <div id="death" class="hidden">ELIMINATED<small>respawning…</small></div>
   <div id="overlay">
     Click to play
-    <small>WASD to move &nbsp;·&nbsp; mouse to look &nbsp;·&nbsp; Esc to release</small>
+    <small>WASD to move &nbsp;·&nbsp; mouse to look &nbsp;·&nbsp; click to shoot &nbsp;·&nbsp; Esc to release</small>
   </div>
 
   <!-- Babylon.js core + materials (GridMaterial) from CDN -->

@@ -10,6 +10,7 @@ public sealed record InputMessage
     public bool Back { get; init; }
     public bool Left { get; init; }
     public bool Right { get; init; }
+    public bool Fire { get; init; }
     public float Yaw { get; init; }
     public float Pitch { get; init; }
 

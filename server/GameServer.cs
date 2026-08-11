@@ -23,6 +23,19 @@ public sealed class GameServer : BackgroundService
     private const float MoveSpeed = 6f;    // world units per second
     private const float ArenaHalf = 19f;   // arena is 40x40, keep players just inside
 
+    // Combat tuning.
+    private const float MaxHealth = 100f;
+    private const float ShotDamage = 25f;      // 4 shots to down a full-health player
+    private const float ShotRange = 100f;      // hitscan reach (covers the whole arena)
+    private const float EyeHeight = 1.6f;      // must match the client camera height
+    private const int FireIntervalTicks = 7;   // ~0.12s between shots at 60Hz
+    private static readonly int RespawnDelayTicks = TickRate * 2; // 2s
+
+    // Player hit box: axis-aligned, matching the 0.8 x 1.0 x 0.8 client box (centred at y=0.5).
+    private const float BoxHalfXZ = 0.4f;
+    private const float BoxBottom = 0f;
+    private const float BoxTop = 1.0f;
+
     private static readonly JsonSerializerOptions Json = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -135,35 +148,159 @@ public sealed class GameServer : BackgroundService
         while (await timer.WaitForNextTickAsync(ct))
         {
             _tick++;
-            Step(dt);
+            var hitShooters = Step(dt);
+
+            // Tell each shooter their shot connected, so the client can show a hitmarker.
+            foreach (var shooter in hitShooters)
+                await SendJson(shooter.Socket, new { type = "hit" }, ct);
 
             if (_tick % ticksPerSend == 0)
                 await Broadcast(ct);
         }
     }
 
-    private void Step(float dt)
+    /// <summary>Advances the world one step. Returns the players whose shots connected this tick.</summary>
+    private List<Player> Step(float dt)
     {
+        var hitShooters = new List<Player>();
+
         foreach (var p in _players.Values)
         {
             var inp = p.Latest;
             p.Yaw = inp.Yaw;
             p.Pitch = inp.Pitch;
 
-            float mx = (inp.Right ? 1f : 0f) - (inp.Left ? 1f : 0f);
-            float mz = (inp.Fwd ? 1f : 0f) - (inp.Back ? 1f : 0f);
-            if (mx == 0f && mz == 0f) continue;
+            // Respawn timer for the dead.
+            if (!p.Alive)
+            {
+                if (_tick >= p.RespawnTick) Respawn(p);
+                continue;
+            }
 
-            // Forward/right basis from yaw (matches Babylon's left-handed, Y-up convention).
-            float sin = MathF.Sin(inp.Yaw), cos = MathF.Cos(inp.Yaw);
-            float dx = sin * mz + cos * mx;   // forward.x*mz + right.x*mx
-            float dz = cos * mz - sin * mx;   // forward.z*mz + right.z*mx
-            float len = MathF.Sqrt(dx * dx + dz * dz);
-            dx /= len; dz /= len;
+            MovePlayer(p, inp, dt);
 
-            p.X = Math.Clamp(p.X + dx * MoveSpeed * dt, -ArenaHalf, ArenaHalf);
-            p.Z = Math.Clamp(p.Z + dz * MoveSpeed * dt, -ArenaHalf, ArenaHalf);
+            // Firing: server owns the fire-rate cooldown so clients can't out-shoot it.
+            if (inp.Fire && _tick >= p.NextShotTick)
+            {
+                p.NextShotTick = _tick + (uint)FireIntervalTicks;
+                if (TryHitscan(p, out var target))
+                {
+                    target.Health -= ShotDamage;
+                    hitShooters.Add(p);
+                    if (target.Health <= 0f)
+                    {
+                        target.Alive = false;
+                        target.RespawnTick = _tick + (uint)RespawnDelayTicks;
+                        _log.LogInformation("Player {Killer} killed {Victim}", p.Id, target.Id);
+                    }
+                }
+            }
         }
+
+        return hitShooters;
+    }
+
+    private static void MovePlayer(Player p, InputMessage inp, float dt)
+    {
+        float mx = (inp.Right ? 1f : 0f) - (inp.Left ? 1f : 0f);
+        float mz = (inp.Fwd ? 1f : 0f) - (inp.Back ? 1f : 0f);
+        if (mx == 0f && mz == 0f) return;
+
+        // Forward/right basis from yaw (matches Babylon's left-handed, Y-up convention).
+        float sin = MathF.Sin(inp.Yaw), cos = MathF.Cos(inp.Yaw);
+        float dx = sin * mz + cos * mx;   // forward.x*mz + right.x*mx
+        float dz = cos * mz - sin * mx;   // forward.z*mz + right.z*mx
+        float len = MathF.Sqrt(dx * dx + dz * dz);
+        dx /= len; dz /= len;
+
+        p.X = Math.Clamp(p.X + dx * MoveSpeed * dt, -ArenaHalf, ArenaHalf);
+        p.Z = Math.Clamp(p.Z + dz * MoveSpeed * dt, -ArenaHalf, ArenaHalf);
+    }
+
+    private void Respawn(Player p)
+    {
+        var rng = Random.Shared;
+        p.X = (rng.NextSingle() * 2f - 1f) * 15f;
+        p.Z = (rng.NextSingle() * 2f - 1f) * 15f;
+        p.Health = MaxHealth;
+        p.Alive = true;
+    }
+
+    /// <summary>
+    /// Casts a ray from the shooter's eye along their view direction and returns the nearest
+    /// alive player it hits within range. No lag compensation yet (Phase 4) — uses live positions.
+    /// </summary>
+    private bool TryHitscan(Player shooter, out Player hit)
+    {
+        hit = null!;
+
+        // View direction from yaw/pitch (matches the client camera's Euler order).
+        float cp = MathF.Cos(shooter.Pitch), sp = MathF.Sin(shooter.Pitch);
+        float sy = MathF.Sin(shooter.Yaw), cy = MathF.Cos(shooter.Yaw);
+        float dx = cp * sy, dy = -sp, dz = cp * cy;
+
+        float ox = shooter.X, oy = EyeHeight, oz = shooter.Z;
+        float best = ShotRange;
+
+        foreach (var t in _players.Values)
+        {
+            if (ReferenceEquals(t, shooter) || !t.Alive) continue;
+
+            if (RayAabb(ox, oy, oz, dx, dy, dz,
+                        t.X - BoxHalfXZ, BoxBottom, t.Z - BoxHalfXZ,
+                        t.X + BoxHalfXZ, BoxTop, t.Z + BoxHalfXZ,
+                        out float dist) && dist < best)
+            {
+                best = dist;
+                hit = t;
+            }
+        }
+
+        return hit is not null;
+    }
+
+    /// <summary>Slab-method ray/AABB intersection. Returns the entry distance along the ray.</summary>
+    private static bool RayAabb(
+        float ox, float oy, float oz, float dx, float dy, float dz,
+        float minX, float minY, float minZ, float maxX, float maxY, float maxZ,
+        out float dist)
+    {
+        dist = 0f;
+        float tmin = 0f, tmax = float.PositiveInfinity;
+
+        // X slab
+        if (MathF.Abs(dx) < 1e-8f) { if (ox < minX || ox > maxX) return false; }
+        else
+        {
+            float inv = 1f / dx;
+            float t1 = (minX - ox) * inv, t2 = (maxX - ox) * inv;
+            if (t1 > t2) (t1, t2) = (t2, t1);
+            tmin = MathF.Max(tmin, t1); tmax = MathF.Min(tmax, t2);
+            if (tmin > tmax) return false;
+        }
+        // Y slab
+        if (MathF.Abs(dy) < 1e-8f) { if (oy < minY || oy > maxY) return false; }
+        else
+        {
+            float inv = 1f / dy;
+            float t1 = (minY - oy) * inv, t2 = (maxY - oy) * inv;
+            if (t1 > t2) (t1, t2) = (t2, t1);
+            tmin = MathF.Max(tmin, t1); tmax = MathF.Min(tmax, t2);
+            if (tmin > tmax) return false;
+        }
+        // Z slab
+        if (MathF.Abs(dz) < 1e-8f) { if (oz < minZ || oz > maxZ) return false; }
+        else
+        {
+            float inv = 1f / dz;
+            float t1 = (minZ - oz) * inv, t2 = (maxZ - oz) * inv;
+            if (t1 > t2) (t1, t2) = (t2, t1);
+            tmin = MathF.Max(tmin, t1); tmax = MathF.Min(tmax, t2);
+            if (tmin > tmax) return false;
+        }
+
+        dist = tmin;
+        return true;
     }
 
     private async Task Broadcast(CancellationToken ct)
@@ -179,6 +316,7 @@ public sealed class GameServer : BackgroundService
                 id = p.Id,
                 x = p.X, y = p.Y, z = p.Z,
                 yaw = p.Yaw, pitch = p.Pitch,
+                hp = p.Health, alive = p.Alive,
             }).ToArray(),
         };
 

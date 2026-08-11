@@ -84,13 +84,31 @@ window.addEventListener("keyup", (e) => { keys[e.code] = false; });
 
 const overlay = document.getElementById("overlay");
 const crosshair = document.getElementById("crosshair");
+const hitmarker = document.getElementById("hitmarker");
+const healthEl = document.getElementById("health");
+const hpSpan = healthEl.querySelector(".hp");
+const damageEl = document.getElementById("damage");
+const deathEl = document.getElementById("death");
+
+let pointerLocked = false;
+let firing = false;   // left mouse held
+let myHp = 100;
+let myAlive = true;
+let lastShotAt = 0;   // cosmetic tracer cadence (ms)
+const FIRE_MS = 120;  // matches the server's fire interval
 
 canvas.addEventListener("click", () => canvas.requestPointerLock());
 document.addEventListener("pointerlockchange", () => {
-  const locked = document.pointerLockElement === canvas;
-  overlay.classList.toggle("hidden", locked);
-  crosshair.classList.toggle("hidden", !locked);
+  pointerLocked = document.pointerLockElement === canvas;
+  overlay.classList.toggle("hidden", pointerLocked);
+  crosshair.classList.toggle("hidden", !pointerLocked);
+  healthEl.classList.toggle("hidden", !pointerLocked);
+  if (!pointerLocked) firing = false; // don't keep shooting after releasing the mouse
 });
+
+// Fire while the left button is held (only when locked & alive).
+document.addEventListener("mousedown", (e) => { if (e.button === 0 && pointerLocked) firing = true; });
+document.addEventListener("mouseup",   (e) => { if (e.button === 0) firing = false; });
 document.addEventListener("mousemove", (e) => {
   if (document.pointerLockElement !== canvas) return;
   yaw += e.movementX * LOOK_SENS;
@@ -119,8 +137,17 @@ ws.addEventListener("message", (ev) => {
     sendRate = msg.sendRate;
   } else if (msg.type === "state") {
     applyState(msg);
+  } else if (msg.type === "hit") {
+    showHitmarker();
   }
 });
+
+let hitmarkerTimer = 0;
+function showHitmarker() {
+  hitmarker.classList.add("show");
+  clearTimeout(hitmarkerTimer);
+  hitmarkerTimer = setTimeout(() => hitmarker.classList.remove("show"), 90);
+}
 
 function applyState(msg) {
   const seen = new Set();
@@ -129,12 +156,14 @@ function applyState(msg) {
     if (p.id === myId) {
       // Authoritative position for our own camera; height stays fixed for now.
       camera.position.set(p.x, EYE_HEIGHT, p.z);
+      updateSelf(p);
       continue;
     }
     let mesh = others.get(p.id);
     if (!mesh) { mesh = makePlayerBox(p.id); others.set(p.id, mesh); }
     mesh.position.set(p.x, p.y, p.z);
     mesh.rotation.y = p.yaw;
+    mesh.setEnabled(p.alive); // dead players vanish until they respawn
   }
   // Remove players that left.
   for (const [id, mesh] of others) {
@@ -142,19 +171,61 @@ function applyState(msg) {
   }
 }
 
+function updateSelf(p) {
+  // Damage flash when our health drops.
+  if (p.hp < myHp - 0.01) {
+    damageEl.classList.add("flash");
+    requestAnimationFrame(() => damageEl.classList.remove("flash"));
+  }
+  myHp = p.hp;
+  myAlive = p.alive;
+
+  hpSpan.textContent = Math.max(0, Math.round(p.hp));
+  healthEl.classList.toggle("low", p.hp <= 30);
+
+  deathEl.classList.toggle("hidden", p.alive);
+  crosshair.classList.toggle("hidden", !p.alive || !pointerLocked);
+}
+
 // Send our input at the server's send rate (enough to be responsive without spamming).
 setInterval(() => {
   if (ws.readyState !== WebSocket.OPEN) return;
+  const shooting = firing && pointerLocked && myAlive;
   ws.send(JSON.stringify({
     type: "input",
     fwd: !!keys["KeyW"],
     back: !!keys["KeyS"],
     left: !!keys["KeyA"],
     right: !!keys["KeyD"],
+    fire: shooting,
     yaw,
     pitch,
   }));
+
+  // Cosmetic only: spawn a tracer at roughly the server fire rate (the server is authoritative
+  // for actual hits). Predicting the cadence locally keeps the feedback instant.
+  if (shooting && performance.now() - lastShotAt >= FIRE_MS) {
+    lastShotAt = performance.now();
+    spawnTracer();
+  }
 }, 1000 / 60);
+
+// ---- Tracer effect --------------------------------------------------------
+
+function spawnTracer() {
+  const dir = camera.getDirection(BABYLON.Axis.Z);
+  // Start slightly below/right of the eye so it reads like a barrel, not a laser from your nose.
+  const start = camera.position
+    .add(dir.scale(0.6))
+    .add(camera.getDirection(BABYLON.Axis.X).scale(0.18))
+    .add(new BABYLON.Vector3(0, -0.12, 0));
+  const end = camera.position.add(dir.scale(60));
+
+  const line = BABYLON.MeshBuilder.CreateLines("tracer", { points: [start, end] }, scene);
+  line.color = new BABYLON.Color3(1, 0.85, 0.4);
+  line.isPickable = false;
+  setTimeout(() => line.dispose(), 55);
+}
 
 // ---- Render loop ----------------------------------------------------------
 
