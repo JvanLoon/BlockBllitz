@@ -11,7 +11,20 @@ services:
       - MaxPlayers=16
     # The server exposes GET /health for external checks.
 
-  # --- Optional: publish over your Cloudflare named tunnel from this compose ---
+  # --- Testing: Cloudflare "quick tunnel" — no account/token, no dashboard setup.
+  # cloudflared generates a random https://<words>.trycloudflare.com URL each time it
+  # starts and prints it to ITS OWN logs (not blockblitz's). Get it with:
+  #   docker compose logs cloudflared | grep trycloudflare
+  # The URL changes every restart — fine for a quick remote check, not for a stable link.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: blockblitz-tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --url http://blockblitz:8080
+    depends_on:
+      - blockblitz
+
+  # --- Production: swap the service above for this once you have a real domain ---
   # Uncomment and set TUNNEL_TOKEN. In the Cloudflare dashboard, add a public
   # hostname route for this tunnel pointing at the ORIGIN  http://blockblitz:8080
   # (same Docker network → service name resolves). WebSocket passthrough is on by default.
