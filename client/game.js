@@ -310,6 +310,10 @@ function startGame(code, name) {
   const weaponNameEl = document.getElementById("weaponName");
   const scoreboard = document.getElementById("scoreboard");
   const scoreboardBody = scoreboard.querySelector("tbody");
+  const connIcon = document.getElementById("connIcon");
+  const disconnectScreen = document.getElementById("disconnectScreen");
+  const disconnectLobbyBtn = document.getElementById("disconnectLobbyBtn");
+  const disconnectHint = document.getElementById("disconnectHint");
 
   let pointerLocked = false;
   let firing = false;      // left mouse held
@@ -515,13 +519,24 @@ function startGame(code, name) {
   let myId = null;
   let tickRate = 60, sendRate = 30;
   let connected = false;
+  let joined = false;          // true once we've actually entered the match (past "welcome")
+  let intentionalClose = false; // set before we close the socket ourselves (Leave lobby)
+  let disconnectedUnexpectedly = false;
+  let lastPongAt = 0; // set once joined, so the staleness clock starts from actual join time
+  let lastRtt = 0;
 
   const wsProto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${wsProto}://${location.host}/ws?code=${encodeURIComponent(code)}`);
   ws.binaryType = "arraybuffer"; // state messages arrive binary; everything else is JSON text
 
   ws.addEventListener("open", () => { connected = true; });
-  ws.addEventListener("close", () => { connected = false; });
+  ws.addEventListener("close", () => {
+    connected = false;
+    // A close after "error"/"full" (never actually joined) is lobby.js's problem, not ours —
+    // only treat this as "kicked out mid-game" if we'd actually gotten in and didn't leave
+    // on purpose.
+    if (joined && !intentionalClose) handleUnexpectedDisconnect();
+  });
   ws.addEventListener("message", (ev) => {
     if (ev.data instanceof ArrayBuffer) { decodeStateBinary(ev.data); return; }
     let msg;
@@ -559,11 +574,19 @@ function startGame(code, name) {
       lobbyBadge.classList.remove("hidden");
       overlay.classList.remove("hidden");
 
+      joined = true;
+      lastPongAt = performance.now(); // staleness clock starts now, not from before we connected
       ws.send(JSON.stringify({ type: "join", name }));
+      setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "ping", t: performance.now() }));
+      }, 1500);
     } else if (msg.type === "roster") {
       applyRoster(msg);
     } else if (msg.type === "hit") {
       showHitmarker();
+    } else if (msg.type === "pong") {
+      lastRtt = performance.now() - msg.t;
+      lastPongAt = performance.now();
     } else if (msg.type === "error" || msg.type === "full") {
       window.BlockBlitzLobby?.onJoinError(msg.type === "full" ? "full" : (msg.reason || "error"));
     }
@@ -572,12 +595,86 @@ function startGame(code, name) {
   /** Disconnects and goes back to the server browser. A full reload is the simplest way to
    * reset every piece of match state (scene, meshes, prediction, HUD) cleanly. */
   function leaveLobby() {
+    intentionalClose = true;
     try { ws.close(); } catch { /* already closing */ }
     location.reload();
   }
 
   leaveLobbyLink.addEventListener("click", (e) => {
     e.stopPropagation();
+    leaveLobby();
+  });
+
+  // ---- Connection health: status icon + unexpected-disconnect takeover ------
+
+  const RTT_LAG_MS = 200;      // server-side lag: ping this high or worse
+  const PONG_STALE_MS = 4000;  // server-side lag: no pong at all in this long
+  const FPS_LAG = 30;          // client-side lag: sustained render fps below this
+  let fpsLagging = false;
+  let fpsCheckAt = 0;
+  let lowFpsStreak = 0;
+
+  /** Called every frame from the render loop — cheap, just a threshold check + occasional
+   * sampling, no allocation. */
+  function updateConnStatus() {
+    const now = performance.now();
+    if (now - fpsCheckAt > 500) {
+      fpsCheckAt = now;
+      const fps = engine.getFps();
+      if (fps < FPS_LAG) lowFpsStreak++; else lowFpsStreak = 0;
+      fpsLagging = lowFpsStreak >= 2; // ~1s sustained, so a single frame hitch doesn't flicker it
+    }
+
+    let state = null;
+    if (disconnectedUnexpectedly) {
+      state = "red";
+    } else if (joined && connected) {
+      if (now - lastPongAt > PONG_STALE_MS || lastRtt > RTT_LAG_MS) state = "orange";
+      else if (fpsLagging) state = "yellow";
+    }
+
+    connIcon.classList.toggle("hidden", !state);
+    connIcon.classList.remove("yellow", "orange", "red");
+    if (state) connIcon.classList.add(state);
+  }
+
+  /** The server dropped us mid-game (not from clicking "Leave lobby") — e.g. the host
+   * stopped it. Freeze the game behind a takeover screen instead of leaving a dead, silently
+   * unresponsive view. */
+  function handleUnexpectedDisconnect() {
+    disconnectedUnexpectedly = true;
+    clearInterval(inputLoopHandle);
+    firing = false;
+    if (document.pointerLockElement === canvas) document.exitPointerLock();
+    overlay.classList.add("hidden");
+    disconnectScreen.classList.remove("hidden");
+    pollServerHealth();
+  }
+
+  let healthPollTimer = 0;
+  async function checkServerHealth() {
+    try {
+      const res = await fetch("/health", { cache: "no-store", signal: AbortSignal.timeout(3000) });
+      if (res.ok) {
+        disconnectLobbyBtn.disabled = false;
+        disconnectHint.classList.add("hidden");
+        return;
+      }
+    } catch { /* treated as down below */ }
+    disconnectLobbyBtn.disabled = true;
+    disconnectHint.classList.remove("hidden");
+  }
+
+  /** Keeps checking while the takeover screen is up, so the button recovers on its own if
+   * the host brings the server back. */
+  function pollServerHealth() {
+    checkServerHealth();
+    clearInterval(healthPollTimer);
+    healthPollTimer = setInterval(checkServerHealth, 3000);
+  }
+
+  disconnectLobbyBtn.addEventListener("click", () => {
+    if (disconnectLobbyBtn.disabled) return;
     leaveLobby();
   });
 
@@ -779,7 +876,8 @@ function startGame(code, name) {
 
   // One input tick: build the input, predict our own movement locally, buffer it for
   // reconciliation, and send it. Runs at the server tick rate so prediction stays in step.
-  setInterval(() => {
+  // Handle kept so an unexpected disconnect can stop the game from doing anything further.
+  const inputLoopHandle = setInterval(() => {
     if (ws.readyState !== WebSocket.OPEN) return;
     const active = pointerLocked && myAlive;             // only move while locked & alive
     const shooting = firing && pointerLocked && myAlive;
@@ -884,6 +982,7 @@ function startGame(code, name) {
 
     scene.render();
     updateNametags();
+    updateConnStatus();
 
     hud.textContent =
       `${connected ? "online" : "offline"} · ${others.size + (myId ? 1 : 0)} players · ${engine.getFps().toFixed(0)} fps`;

@@ -147,4 +147,18 @@ bolt-on later instead of a rewrite.
       middle (see the jump entry above). The original map is unchanged and is always what
       the public lobby uses. The create-lobby form has a map dropdown (`GET /api/maps`), and
       the server browser's lobby list shows each lobby's map.
+- [x] Connection status indicator + graceful disconnect handling — a small "no signal" icon,
+      top-left, hidden when healthy: yellow for client-side lag (sustained render fps below
+      30), orange for server-side lag (ping >200ms via a new lightweight ping/pong message,
+      or no pong at all for 4s), red when the server drops the connection unexpectedly
+      (`server/Lobby.cs` handles `type:"ping"`; `updateConnStatus` in `client/game.js`).
+      An unexpected disconnect (not from clicking "Leave lobby") freezes the game — stops
+      the input loop, releases pointer lock — behind a takeover screen ("Server disconnected
+      you from the lobby" + a Lobby button) instead of leaving a dead, silently unresponsive
+      view. The button polls `GET /health` and disables itself with a "Server is down" hint
+      when the whole server (not just the connection) is unreachable, re-enabling
+      automatically once it comes back — useful when intentionally stopping the server
+      during testing. Verified end-to-end headlessly: killing the server process mid-game
+      shows the red icon + disabled button + hint; restarting it re-enables the button
+      without a page reload; clicking "Leave lobby" normally never triggers the takeover.
 - [ ] Spectator mode

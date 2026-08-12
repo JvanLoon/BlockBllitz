@@ -183,6 +183,14 @@ public sealed class Lobby
                         if (name.Length > 0) player.Name = name;
                     }
                 }
+                else if (type == "ping")
+                {
+                    // Round-trip latency probe for the client's connection-quality indicator.
+                    // Echoed back immediately (not queued through the tick loop) so it measures
+                    // actual network RTT, not tick-loop scheduling jitter.
+                    if (doc.RootElement.TryGetProperty("t", out var tEl) && tEl.TryGetDouble(out var t))
+                        await SendJson(player.Socket, new { type = "pong", t }, ct);
+                }
                 else
                 {
                     var input = JsonSerializer.Deserialize<InputMessage>(text, Json);

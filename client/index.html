@@ -36,6 +36,16 @@
     .hidden { display: none !important; }
     #title { position: fixed; left: 12px; top: 10px; color: #7fd7ff; font: 700 18px system-ui, sans-serif; letter-spacing: 1px; text-shadow: 0 1px 2px #000; }
 
+    /* Connection status: hidden when healthy, a "no signal" glyph tinted by severity when not. */
+    #connIcon {
+      position: fixed; left: 12px; top: 34px; width: 22px; height: 22px;
+      z-index: 25; pointer-events: none; color: #ffd23f;
+    }
+    #connIcon svg { width: 100%; height: 100%; fill: none; stroke: currentColor; }
+    #connIcon.yellow { color: #ffd23f; filter: drop-shadow(0 0 3px rgba(255,210,63,0.65)); }
+    #connIcon.orange { color: #ff9d3f; filter: drop-shadow(0 0 3px rgba(255,157,63,0.65)); }
+    #connIcon.red    { color: #ff4d4d; filter: drop-shadow(0 0 4px rgba(255,77,77,0.75)); }
+
     /* Current lobby badge, top-right, so the code stays shareable mid-match. */
     #lobbyBadge {
       position: fixed; right: 14px; top: 10px; color: #9fb4d6;
@@ -98,7 +108,12 @@
       color: #04121f; background: #5fd0ff; border: none; border-radius: 8px; cursor: pointer;
     }
     .panel button.primary:hover { background: #8adcff; }
+    .panel button.primary:disabled { opacity: 0.4; cursor: not-allowed; background: #5fd0ff; }
     .panel small { font: 500 13px system-ui, sans-serif; color: #8ea3c4; letter-spacing: 0; }
+
+    /* Unexpected-disconnect takeover screen */
+    #disconnectTitle { font: 700 20px/1.4 system-ui, sans-serif; color: #ffb3b3; max-width: 380px; }
+    #disconnectHint { color: #ff8a8a; }
     #overlayLobbyInfo { font: 600 14px system-ui, sans-serif; color: #7fd7ff; letter-spacing: 1px; }
     #leaveLobbyLink {
       margin-top: 4px; font: 500 13px system-ui, sans-serif; color: #7f9bc4; text-decoration: underline;
@@ -178,6 +193,16 @@
   <canvas id="renderCanvas"></canvas>
   <div id="title">BLOCKBLITZ</div>
   <div id="lobbyBadge" class="hidden"></div>
+  <!-- Connection status: hidden when healthy. Yellow = client-side lag (low FPS), orange =
+       server-side lag (high ping / stalled), red = unexpectedly disconnected. -->
+  <div id="connIcon" class="hidden" title="Connection status">
+    <svg viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 16a15 15 0 0 1 16 0" />
+      <path d="M7.5 19.5a9 9 0 0 1 9 0" />
+      <circle cx="12" cy="20.5" r="0.6" fill="currentColor" stroke="none" />
+      <line x1="2.5" y1="3" x2="21.5" y2="21" />
+    </svg>
+  </div>
   <div id="damage"></div>
   <div id="crosshair" class="hidden"></div>
   <div id="hitmarker"></div>
@@ -202,6 +227,16 @@
       <small>1-5 weapon · R reload · Tab scores · Esc release</small>
       <small>Starts with a knife — pick up guns from the glowing pads on the map</small>
       <a id="leaveLobbyLink">Leave lobby</a>
+    </div>
+  </div>
+
+  <!-- Shown when the WebSocket drops unexpectedly (not from clicking "Leave lobby") — e.g.
+       the host stopped the server. Freezes the game behind it. -->
+  <div id="disconnectScreen" class="screen hidden">
+    <div class="panel">
+      <div id="disconnectTitle">Server disconnected you from the lobby</div>
+      <button id="disconnectLobbyBtn" class="primary">LOBBY</button>
+      <small id="disconnectHint" class="hidden">Server is down</small>
     </div>
   </div>
 
