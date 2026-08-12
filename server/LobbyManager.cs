@@ -25,6 +25,7 @@ public sealed class LobbyManager : BackgroundService
         public required Lobby Lobby { get; init; }
         public required CancellationTokenSource Cts { get; init; }
         public DateTime? EmptySince;
+        public bool Permanent; // server-managed lobby: never reaped, regardless of player count
     }
 
     private readonly ConcurrentDictionary<string, Entry> _lobbies = new();
@@ -51,9 +52,22 @@ public sealed class LobbyManager : BackgroundService
         var code = GenerateCode();
         if (code is null) return null; // exhausted attempts (extremely unlikely at 32^5 codes)
 
+        return StartLobby(code, name, maxPlayers, permanent: false);
+    }
+
+    /// <summary>
+    /// Creates a fixed-code, always-on lobby that the empty-lobby sweep never touches — used
+    /// once at startup for the default public arena. Unlike <see cref="CreateLobby"/>, the
+    /// caller picks the join code (so it can be a short, memorable, documented constant).
+    /// </summary>
+    public Lobby CreateManagedLobby(string code, string name, int? maxPlayers = null) =>
+        StartLobby(code, name, maxPlayers ?? _maxPlayersCap, permanent: true);
+
+    private Lobby StartLobby(string code, string name, int maxPlayers, bool permanent)
+    {
         var lobby = new Lobby(code, name, maxPlayers, _loggerFactory.CreateLogger($"Lobby[{code}]"));
         var cts = new CancellationTokenSource();
-        _lobbies[code] = new Entry { Lobby = lobby, Cts = cts };
+        _lobbies[code] = new Entry { Lobby = lobby, Cts = cts, Permanent = permanent };
 
         _ = RunLobby(lobby, cts.Token);
         return lobby;
@@ -113,6 +127,7 @@ public sealed class LobbyManager : BackgroundService
             var now = DateTime.UtcNow;
             foreach (var (code, entry) in _lobbies)
             {
+                if (entry.Permanent) continue;
                 if (entry.Lobby.PlayerCount > 0) { entry.EmptySince = null; continue; }
                 entry.EmptySince ??= now;
                 if (now - entry.EmptySince.Value < EmptyGrace) continue;

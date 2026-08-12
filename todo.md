@@ -101,4 +101,12 @@ bolt-on later instead of a rewrite.
       `POST /api/lobbies` and addressed by code over `/ws?code=`. Empty lobbies are swept
       after a 30s grace period. "Leave lobby" does a full page reload back to the browser
       (simplest full state reset); name is remembered via localStorage.
+      Refined: the 3D scene/map is no longer built (nor is the game WebSocket opened) until
+      a lobby is actually joined — `game.js` does nothing at all until `window.BlockBlitzGame
+      .start(code, name)` is called, so the pre-game screens sit over a plain black
+      background instead of a live scene running behind them. The name screen is skipped
+      entirely once a name is stored (only re-shown via "Change name" in the browser, the
+      de facto main menu). A server-managed "Public Arena" lobby (fixed code `PUBLIC`) is
+      created at startup and is exempt from the empty-lobby sweep, so there's always
+      somewhere to play immediately.
 - [ ] Spectator mode

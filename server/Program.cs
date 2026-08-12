@@ -12,6 +12,10 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<LobbyManager>());
 
 var app = builder.Build();
 
+// Always-on public lobby: created once at startup, exempt from the empty-lobby sweep, so
+// there's always somewhere to play without needing to create a lobby first.
+app.Services.GetRequiredService<LobbyManager>().CreateManagedLobby("PUBLIC", "Public Arena");
+
 // Serve the Babylon.js client as static files (index.html by default). The path is
 // CLIENT_PATH when set (Docker), otherwise ../client relative to the app for local dev.
 var clientPath = builder.Configuration["CLIENT_PATH"]

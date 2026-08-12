@@ -2,14 +2,16 @@
 
 // ---- Pre-game flow: name entry -> server browser -> hand off to game.js -----------------
 //
-// game.js owns the 3D scene and only opens its WebSocket once a lobby has been chosen (via
-// window.BlockBlitzGame.connect(code, name)). This file owns everything before that.
+// game.js does nothing at all — doesn't even build the 3D scene — until a lobby is chosen,
+// at which point it's handed off to via window.BlockBlitzGame.start(code, name). This file
+// owns everything before that, so there's nothing running in the background pre-game.
 
 const nameScreen = document.getElementById("nameScreen");
 const playerNameInput = document.getElementById("playerNameInput");
 const nameContinueBtn = document.getElementById("nameContinueBtn");
 
 const browserScreen = document.getElementById("browserScreen");
+const changeNameLink = document.getElementById("changeNameLink");
 const createNameInput = document.getElementById("createNameInput");
 const createMaxInput = document.getElementById("createMaxInput");
 const createBtn = document.getElementById("createBtn");
@@ -22,13 +24,16 @@ const joinError = document.getElementById("joinError");
 let myName = "";
 let pollTimer = 0;
 
-// ---- Step 1: name --------------------------------------------------------
+// ---- Step 1: name -----------------------------------------------------------
+//
+// Stored in localStorage, which only clears when the browser's site data/cache is cleared —
+// so once set, we skip straight to the server browser on every later visit.
 
-playerNameInput.value = localStorage.getItem("blockblitz-name") || "";
+const NAME_KEY = "blockblitz-name";
 
 function confirmName() {
   const name = playerNameInput.value.trim();
-  if (name) localStorage.setItem("blockblitz-name", name);
+  if (name) localStorage.setItem(NAME_KEY, name);
   myName = name;
   nameScreen.classList.add("hidden");
   showBrowser();
@@ -39,7 +44,25 @@ playerNameInput.addEventListener("keydown", (e) => {
   e.stopPropagation();
   if (e.key === "Enter") confirmName();
 });
-playerNameInput.focus();
+
+/** Shows the name screen, pre-filled with whatever name we currently have. */
+function showNameScreen() {
+  hideBrowser();
+  playerNameInput.value = myName;
+  nameScreen.classList.remove("hidden");
+  playerNameInput.focus();
+}
+
+const storedName = localStorage.getItem(NAME_KEY);
+if (storedName) {
+  myName = storedName;
+  nameScreen.classList.add("hidden");
+  showBrowser();
+} else {
+  playerNameInput.focus();
+}
+
+changeNameLink.addEventListener("click", showNameScreen);
 
 // ---- Step 2: server browser -----------------------------------------------
 
@@ -109,7 +132,7 @@ joinCodeInput.addEventListener("keydown", (e) => {
 
 function joinLobby(code) {
   hideBrowser();
-  window.BlockBlitzGame.connect(code, myName);
+  window.BlockBlitzGame.start(code, myName);
 }
 
 // Called by game.js if the WebSocket reports the lobby is gone/full instead of a welcome.

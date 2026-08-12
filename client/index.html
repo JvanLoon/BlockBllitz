@@ -107,7 +107,12 @@
     #leaveLobbyLink:hover { color: #b7cbe8; }
 
     /* Server browser */
+    #browserTitleRow { display: flex; align-items: center; justify-content: space-between; width: 100%; }
     #browserTitle { font: 700 16px system-ui, sans-serif; letter-spacing: 2px; color: #7fd7ff; }
+    #changeNameLink {
+      font: 500 12px system-ui, sans-serif; color: #7f9bc4; text-decoration: underline; cursor: pointer;
+    }
+    #changeNameLink:hover { color: #b7cbe8; }
     .browserRow { display: flex; gap: 8px; width: 100%; align-items: center; }
     .browserRow input[type="text"], .browserRow input[type="number"] { flex: 1; min-width: 0; }
     .browserRow input[type="number"] { flex: 0 0 70px; }
@@ -209,7 +214,10 @@
   <!-- Step 2: server browser — create a lobby, join one from the list, or join by code. -->
   <div id="browserScreen" class="screen hidden">
     <div class="panel wide">
-      <div id="browserTitle">SERVER BROWSER</div>
+      <div id="browserTitleRow">
+        <div id="browserTitle">SERVER BROWSER</div>
+        <a id="changeNameLink">Change name</a>
+      </div>
 
       <div class="browserRow">
         <input id="createNameInput" type="text" placeholder="Lobby name" maxlength="24" autocomplete="off" />
@@ -230,7 +238,7 @@
       <div class="browserDivider"></div>
 
       <div class="browserRow">
-        <input id="joinCodeInput" type="text" placeholder="HAVE A CODE?" maxlength="5" autocomplete="off" />
+        <input id="joinCodeInput" type="text" placeholder="HAVE A CODE?" maxlength="12" autocomplete="off" />
         <button id="joinCodeBtn">JOIN</button>
       </div>
       <div id="joinError"></div>
