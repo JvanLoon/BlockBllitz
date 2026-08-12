@@ -56,9 +56,24 @@ bolt-on later instead of a rewrite.
 - [x] Entity interpolation for other players (render ~100ms in the past; verified 96ms, fractional renderTick)
 - [x] Lag compensation for hitscan (server keeps 64-tick position history, rewinds targets to the
       shooter's renderTick). Hit-reg verified; full moving-target benefit needs real WAN latency to see.
-- [ ] Switch JSON -> binary serialization for bandwidth/perf  (DEFERRED: pure optimization, no feel
-      impact; adds protocol fragility. Revisit only if bandwidth becomes a real constraint.)
-- [ ] Snapshot/delta compression (only send what changed)     (DEFERRED: same rationale.)
+- [x] Switch JSON -> binary serialization + delta compression for the state broadcast — a
+      load test showed bandwidth, not CPU, was the real scaling constraint (~41 Mbps for one
+      16-player lobby). The state message is now a fixed 49-byte binary record per player
+      (WebSocket binary frame) instead of ~300+ bytes of JSON text, and a player is only
+      included if their state actually changed since the last broadcast beyond a small
+      epsilon (`Lobby.IsDirty`/`BuildStateBinary` in `server/Lobby.cs`) — safe because
+      WebSocket/TCP guarantees every client sees the same ordered stream, so one server-side
+      "last sent" baseline (not per-client) is enough. Names moved out of the hot path
+      entirely into a separate low-frequency JSON `roster` message (id -> name), which also
+      doubles as the client's membership signal (departures aren't inferred from a player's
+      absence in a delta — that just means they didn't change). Client reconstructs a full
+      per-tick roster from the accumulated deltas (`playerStates` map in `client/game.js`) so
+      the rest of the client (interpolation, reconciliation, HUD) is unchanged.
+      Verified: scripted binary-protocol tests confirm movement/jump physics decode
+      correctly and delta compression sends zero state messages while genuinely idle.
+      Re-ran the same load test as before the same day: 16 players in one lobby went from
+      ~41.5 Mbps to ~3.3 Mbps (~12.6x less bandwidth), with CPU essentially unchanged-to-
+      slightly-lower (less JSON/GC overhead).
 
 ## Phase 5 — Ship (Cloudflare tunnel)  ✅ DONE (except live external test)
 - [x] Dockerize server; server serves the client (multi-stage .NET 10; CLIENT_PATH).

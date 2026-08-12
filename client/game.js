@@ -238,6 +238,12 @@ function startGame(code, name) {
   const others = new Map();
   /** @type {Map<string, HTMLElement>} id -> floating name tag */
   const tags = new Map();
+  /** @type {Map<string, object>} id -> last-known full player record, merged from the binary
+   * delta stream (see decodeStateBinary) so the rest of the client still works with a
+   * complete per-tick roster, same as before delta compression. */
+  const playerStates = new Map();
+  /** @type {Map<string, string>} id -> name, from the low-frequency "roster" message. */
+  const rosterNames = new Map();
 
   // Simple humanoid silhouette (torso + head + arms), proportioned from PLAYER_HEIGHT so it
   // stays exactly as tall as the server's hitbox (and — per design — the eye/viewmodel
@@ -512,10 +518,12 @@ function startGame(code, name) {
 
   const wsProto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${wsProto}://${location.host}/ws?code=${encodeURIComponent(code)}`);
+  ws.binaryType = "arraybuffer"; // state messages arrive binary; everything else is JSON text
 
   ws.addEventListener("open", () => { connected = true; });
   ws.addEventListener("close", () => { connected = false; });
   ws.addEventListener("message", (ev) => {
+    if (ev.data instanceof ArrayBuffer) { decodeStateBinary(ev.data); return; }
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
     if (msg.type === "welcome") {
@@ -552,8 +560,8 @@ function startGame(code, name) {
       overlay.classList.remove("hidden");
 
       ws.send(JSON.stringify({ type: "join", name }));
-    } else if (msg.type === "state") {
-      applyState(msg);
+    } else if (msg.type === "roster") {
+      applyRoster(msg);
     } else if (msg.type === "hit") {
       showHitmarker();
     } else if (msg.type === "error" || msg.type === "full") {
@@ -572,6 +580,81 @@ function startGame(code, name) {
     e.stopPropagation();
     leaveLobby();
   });
+
+  // ---- Binary state decoding --------------------------------------------------
+  //
+  // Mirrors Lobby.cs's BuildStateBinary/WritePlayerRecord exactly: a 7-byte header (tick,
+  // pickup bitmask, player count) followed by one 49-byte fixed record per player who
+  // changed since the server's last broadcast. Only-the-changed-players is why this can't be
+  // treated as "the current roster" directly — playerStates accumulates each decoded record
+  // so the rest of the client (applyState/interpolation) still sees a complete picture, same
+  // as when the server sent full JSON snapshots.
+  const textDecoder = new TextDecoder();
+
+  function decodeStateBinary(buf) {
+    const dv = new DataView(buf);
+    let off = 0;
+    const tick = dv.getUint32(off, true); off += 4;
+    const pickupByte = dv.getUint8(off); off += 1;
+    const count = dv.getUint16(off, true); off += 2;
+
+    for (let i = 0; i < count; i++) {
+      const id = textDecoder.decode(new Uint8Array(buf, off, 8)); off += 8;
+      const flags = dv.getUint8(off); off += 1;
+      const x = dv.getFloat32(off, true); off += 4;
+      const y = dv.getFloat32(off, true); off += 4;
+      const z = dv.getFloat32(off, true); off += 4;
+      const vy = dv.getFloat32(off, true); off += 4;
+      const yaw = dv.getFloat32(off, true); off += 4;
+      const pitch = dv.getFloat32(off, true); off += 4;
+      const hp = dv.getFloat32(off, true); off += 4;
+      const ammo = dv.getUint16(off, true); off += 2;
+      const weapon = dv.getUint8(off); off += 1;
+      const ownedBits = dv.getUint8(off); off += 1;
+      const kills = dv.getUint16(off, true); off += 2;
+      const deaths = dv.getUint16(off, true); off += 2;
+      const seq = dv.getUint32(off, true); off += 4;
+
+      const owned = [];
+      for (let b = 0; b < 5; b++) owned.push(!!(ownedBits & (1 << b)));
+
+      // A fresh object each time (never mutate an existing one) so older interpolation
+      // snapshots that still reference a previous record stay frozen/correct.
+      playerStates.set(id, {
+        id, x, y, z, vy, yaw, pitch, hp,
+        alive: !!(flags & 1), reloading: !!(flags & 2),
+        ammo, weapon, owned, kills, deaths, seq,
+        name: rosterNames.get(id) || "",
+      });
+    }
+
+    const pickups = [];
+    for (let i = 0; i < pickupVisuals.length; i++) pickups.push(!!(pickupByte & (1 << i)));
+
+    applyState({ tick, pickups, players: [...playerStates.values()] });
+  }
+
+  /// Low-frequency id->name (+ membership) companion to the binary state stream. Since state
+  /// only ever carries deltas, this is also the sole signal for "who's still here" — a
+  /// departed id is dropped from playerStates/meshes/tags here, not inferred from absence in
+  /// a state message (their absence there just means they haven't changed, not that they left).
+  function applyRoster(msg) {
+    const entries = Object.entries(msg.players || {});
+    const newIds = new Set(entries.map(([id]) => id));
+    const oldIds = new Set(rosterNames.keys());
+    for (const [id, nm] of entries) rosterNames.set(id, nm);
+
+    for (const id of oldIds) {
+      if (newIds.has(id)) continue;
+      rosterNames.delete(id);
+      playerStates.delete(id);
+      if (id === myId) continue;
+      others.get(id)?.dispose();
+      others.delete(id);
+      tags.get(id)?.remove();
+      tags.delete(id);
+    }
+  }
 
   let hitmarkerTimer = 0;
   function showHitmarker() {
@@ -720,6 +803,10 @@ function startGame(code, name) {
     // Predict immediately for instant, smooth local movement.
     if (predInit) ({ x: predX, z: predZ, y: predY, velY: predVelY } = simulateMovement({ x: predX, z: predZ, y: predY, velY: predVelY }, input));
     pendingInputs.push({ seq: input.seq, input });
+    // Now that idle players stop getting fresh acks (delta compression skips unchanged
+    // state), pendingInputs would otherwise grow unbounded while genuinely idle — cap it,
+    // same "bound a flood" spirit as the server's own input queue cap.
+    if (pendingInputs.length > 600) pendingInputs.shift();
 
     ws.send(JSON.stringify({ type: "input", ...input }));
 

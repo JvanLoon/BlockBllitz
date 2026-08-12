@@ -643,46 +643,201 @@ public sealed class Lobby
         return true;
     }
 
+    // ---- State broadcast: binary, delta-compressed ----------------------------
+    //
+    // The state message is by far the hottest thing this server sends (every player, every
+    // tick, to every player — O(players²) bytes). Two optimizations, in order of impact:
+    //   1. Binary instead of JSON: a fixed 49-byte record per player instead of ~300+ bytes
+    //      of JSON text (field names, quotes, decimal-formatted floats).
+    //   2. Delta: a player is only included if something about them actually changed since
+    //      the last broadcast (beyond a small epsilon, so mouse jitter doesn't defeat this).
+    // This only works because WebSocket/TCP guarantees ordered, lossless delivery — every
+    // client sees the exact same broadcast stream, so a single server-side "what did we last
+    // send" baseline (not one per client) is enough; no UDP-style ack/baseline bookkeeping.
+    // Names change essentially only once (at join) so they're carried by a separate,
+    // low-frequency JSON "roster" message instead of bloating every state record.
+
+    private const int PlayerRecordSize = 49; // 8 id + 1 flags + 7 floats(28) + 2 ammo + 1 weapon + 1 owned + 2 kills + 2 deaths + 4 seq
+    private const float PosEpsilon = 0.005f;
+    private const float AngleEpsilon = 0.01f;
+    private const float HpEpsilon = 0.05f;
+
+    private sealed class SentPlayerState
+    {
+        public float X, Y, Z, VelY, Yaw, Pitch, Hp;
+        public bool Alive, Reloading;
+        public int Ammo, Weapon, Kills, Deaths;
+        public uint Seq;
+        public required bool[] Owned;
+    }
+
+    // Only ever touched by the tick loop (never the per-connection receive tasks), so plain
+    // (non-concurrent) collections are safe here.
+    private readonly Dictionary<string, SentPlayerState> _lastSent = new();
+    private readonly Dictionary<string, string> _lastRosterNames = new();
+    private bool[]? _lastSentPickups;
+    private int _lastPlayerCount = -1;
+
     private async Task Broadcast(CancellationToken ct)
     {
         if (_players.IsEmpty) return;
 
-        var snapshot = new
-        {
-            type = "state",
-            tick = _tick,
-            players = _players.Values.Select(p => new
-            {
-                id = p.Id,
-                name = p.Name,
-                x = p.X, y = p.Y, z = p.Z, vy = p.VelY,
-                yaw = p.Yaw, pitch = p.Pitch,
-                hp = p.Health, alive = p.Alive,
-                ammo = p.CurrentAmmo, reloading = p.Reloading, weapon = p.WeaponIndex, owned = p.Owned,
-                kills = p.Kills, deaths = p.Deaths,
-                seq = p.AckSeq,   // reconciliation ack for the owning client
-            }).ToArray(),
-            pickups = _pickupAvailable,
-        };
+        await MaybeBroadcastRoster(ct);
 
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(snapshot, Json);
+        var bytes = BuildStateBinary();
+        if (bytes is null) return; // nothing changed since last time — send nothing at all
 
         // Only the tick loop sends, so there is never a concurrent send on the same socket.
         // Different sockets can go in parallel.
         var sends = _players.Values
             .Where(p => p.Socket.State == WebSocketState.Open)
-            .Select(p => SendRaw(p.Socket, bytes, ct));
+            .Select(p => SendRaw(p.Socket, bytes, ct, WebSocketMessageType.Binary));
         await Task.WhenAll(sends);
+    }
+
+    /// <summary>Builds the binary state message, or null if nothing worth sending changed.
+    /// A membership change (join/leave) forces every current player to be included, so a
+    /// freshly-joined client's first message is a full snapshot, not just future deltas.</summary>
+    private byte[]? BuildStateBinary()
+    {
+        // Drop tracking for anyone who's since disconnected.
+        if (_lastSent.Count > 0)
+        {
+            foreach (var id in _lastSent.Keys.Where(id => !_players.ContainsKey(id)).ToList())
+                _lastSent.Remove(id);
+        }
+
+        bool membershipChanged = _players.Count != _lastPlayerCount;
+        _lastPlayerCount = _players.Count;
+
+        var dirty = new List<Player>();
+        foreach (var p in _players.Values)
+        {
+            _lastSent.TryGetValue(p.Id, out var last);
+            if (membershipChanged || IsDirty(p, last)) dirty.Add(p);
+        }
+
+        bool pickupsChanged = _lastSentPickups is null || !_pickupAvailable.AsSpan().SequenceEqual(_lastSentPickups);
+        if (dirty.Count == 0 && !pickupsChanged) return null;
+
+        var buf = new byte[7 + dirty.Count * PlayerRecordSize];
+        var span = buf.AsSpan();
+        BitConverter.TryWriteBytes(span[0..4], _tick);
+        byte pickupByte = 0;
+        for (int i = 0; i < _pickupAvailable.Length && i < 8; i++)
+            if (_pickupAvailable[i]) pickupByte |= (byte)(1 << i);
+        span[4] = pickupByte;
+        BitConverter.TryWriteBytes(span[5..7], (ushort)dirty.Count);
+
+        int offset = 7;
+        foreach (var p in dirty)
+        {
+            WritePlayerRecord(span.Slice(offset, PlayerRecordSize), p);
+            offset += PlayerRecordSize;
+            _lastSent[p.Id] = new SentPlayerState
+            {
+                X = p.X, Y = p.Y, Z = p.Z, VelY = p.VelY, Yaw = p.Yaw, Pitch = p.Pitch, Hp = p.Health,
+                Alive = p.Alive, Reloading = p.Reloading, Ammo = p.CurrentAmmo, Weapon = p.WeaponIndex,
+                Kills = p.Kills, Deaths = p.Deaths, Seq = p.AckSeq, Owned = (bool[])p.Owned.Clone(),
+            };
+        }
+
+        _lastSentPickups = (bool[])_pickupAvailable.Clone();
+        return buf;
+    }
+
+    private static void WritePlayerRecord(Span<byte> s, Player p)
+    {
+        Encoding.ASCII.GetBytes(p.Id, s[..8]);
+        byte flags = 0;
+        if (p.Alive) flags |= 1;
+        if (p.Reloading) flags |= 2;
+        s[8] = flags;
+        BitConverter.TryWriteBytes(s[9..13], p.X);
+        BitConverter.TryWriteBytes(s[13..17], p.Y);
+        BitConverter.TryWriteBytes(s[17..21], p.Z);
+        BitConverter.TryWriteBytes(s[21..25], p.VelY);
+        BitConverter.TryWriteBytes(s[25..29], p.Yaw);
+        BitConverter.TryWriteBytes(s[29..33], p.Pitch);
+        BitConverter.TryWriteBytes(s[33..37], p.Health);
+        BitConverter.TryWriteBytes(s[37..39], (ushort)Math.Clamp(p.CurrentAmmo, 0, ushort.MaxValue));
+        s[39] = (byte)p.WeaponIndex;
+        byte ownedBits = 0;
+        for (int i = 0; i < p.Owned.Length && i < 8; i++) if (p.Owned[i]) ownedBits |= (byte)(1 << i);
+        s[40] = ownedBits;
+        BitConverter.TryWriteBytes(s[41..43], (ushort)Math.Clamp(p.Kills, 0, ushort.MaxValue));
+        BitConverter.TryWriteBytes(s[43..45], (ushort)Math.Clamp(p.Deaths, 0, ushort.MaxValue));
+        BitConverter.TryWriteBytes(s[45..49], p.AckSeq);
+    }
+
+    /// <summary>True if this player's broadcast-relevant state differs from what we last sent
+    /// by more than float noise — position/angle changes below the epsilon (e.g. sub-pixel
+    /// mouse jitter while otherwise stationary) don't count as "changed" for bandwidth's sake.</summary>
+    private static bool IsDirty(Player p, SentPlayerState? last)
+    {
+        if (last is null) return true;
+        if (p.Alive != last.Alive || p.Reloading != last.Reloading) return true;
+        if (p.CurrentAmmo != last.Ammo || p.WeaponIndex != last.Weapon) return true;
+        if (p.Kills != last.Kills || p.Deaths != last.Deaths) return true;
+        // AckSeq deliberately does NOT trigger dirty on its own — it increments on every
+        // processed input (even neutral ones sent while standing still), so including it
+        // would make every actively-connected player "dirty" every tick regardless of real
+        // movement, defeating delta compression entirely. It's still written into the record
+        // whenever the player is sent for any other reason, so reconciliation catches up as
+        // soon as real state changes (nothing to reconcile if truly idle, so no harm done).
+        if (MathF.Abs(p.X - last.X) > PosEpsilon || MathF.Abs(p.Y - last.Y) > PosEpsilon ||
+            MathF.Abs(p.Z - last.Z) > PosEpsilon || MathF.Abs(p.VelY - last.VelY) > PosEpsilon) return true;
+        if (AngleDiff(p.Yaw, last.Yaw) > AngleEpsilon || AngleDiff(p.Pitch, last.Pitch) > AngleEpsilon) return true;
+        if (MathF.Abs(p.Health - last.Hp) > HpEpsilon) return true;
+        for (int i = 0; i < p.Owned.Length; i++) if (p.Owned[i] != last.Owned[i]) return true;
+        return false;
+    }
+
+    private static float AngleDiff(float a, float b)
+    {
+        float d = a - b;
+        while (d > MathF.PI) d -= 2 * MathF.PI;
+        while (d < -MathF.PI) d += 2 * MathF.PI;
+        return MathF.Abs(d);
+    }
+
+    /// <summary>Low-frequency JSON companion to the binary state stream: id -> name, resent
+    /// (in full) whenever it actually changes — in practice, whenever someone joins or
+    /// leaves. Also doubles as the client's membership signal (who's still here), since the
+    /// binary stream only carries deltas and can't be used to detect departures.</summary>
+    private async Task MaybeBroadcastRoster(CancellationToken ct)
+    {
+        bool changed = _lastRosterNames.Count != _players.Count;
+        if (!changed)
+        {
+            foreach (var p in _players.Values)
+            {
+                if (!_lastRosterNames.TryGetValue(p.Id, out var n) || n != p.Name) { changed = true; break; }
+            }
+        }
+        if (!changed) return;
+
+        _lastRosterNames.Clear();
+        var roster = new Dictionary<string, string>();
+        foreach (var p in _players.Values) { _lastRosterNames[p.Id] = p.Name; roster[p.Id] = p.Name; }
+
+        await SendJson(_players.Values, new { type = "roster", players = roster }, ct);
     }
 
     private static Task SendJson(WebSocket socket, object payload, CancellationToken ct)
         => SendRaw(socket, JsonSerializer.SerializeToUtf8Bytes(payload, Json), ct);
 
-    private static async Task SendRaw(WebSocket socket, byte[] bytes, CancellationToken ct)
+    private static Task SendJson(IEnumerable<Player> to, object payload, CancellationToken ct)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(payload, Json);
+        return Task.WhenAll(to.Where(p => p.Socket.State == WebSocketState.Open).Select(p => SendRaw(p.Socket, bytes, ct)));
+    }
+
+    private static async Task SendRaw(WebSocket socket, byte[] bytes, CancellationToken ct, WebSocketMessageType type = WebSocketMessageType.Text)
     {
         try
         {
-            await socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, ct);
+            await socket.SendAsync(bytes, type, endOfMessage: true, ct);
         }
         catch (WebSocketException) { /* socket closing; receive loop will clean it up */ }
         catch (OperationCanceledException) { }
