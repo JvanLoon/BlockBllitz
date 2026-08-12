@@ -135,6 +135,7 @@ let firing = false;      // left mouse held
 let myHp = 100;
 let myAlive = true;
 let myReloading = false;
+let myAmmo = 30;
 let magSize = 30;
 let latestPlayers = [];  // last state snapshot, for the scoreboard
 let lastShotAt = 0;      // cosmetic tracer cadence (ms)
@@ -162,6 +163,7 @@ nameInput.value = localStorage.getItem("blockblitz-name") || "";
 nameInput.focus();
 
 function startPlaying() {
+  SFX.unlock(); // must run from this user-gesture handler or the browser blocks audio
   const name = nameInput.value.trim();
   if (name) localStorage.setItem("blockblitz-name", name);
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "join", name }));
@@ -294,6 +296,7 @@ function showHitmarker() {
   hitmarker.classList.add("show");
   clearTimeout(hitmarkerTimer);
   hitmarkerTimer = setTimeout(() => hitmarker.classList.remove("show"), 90);
+  SFX.hitmarker();
 }
 
 function applyState(msg) {
@@ -347,14 +350,21 @@ function reconcile(me) {
 }
 
 function updateSelf(p) {
-  // Damage flash when our health drops.
+  // Damage flash + thud when our health drops.
   if (p.hp < myHp - 0.01) {
     damageEl.classList.add("flash");
     requestAnimationFrame(() => damageEl.classList.remove("flash"));
+    SFX.damage();
   }
+  // Edge-detect death and reload start/end for one-shot sounds.
+  if (myAlive && !p.alive) SFX.death();
+  if (!myReloading && p.reloading) SFX.reloadStart();
+  if (myReloading && !p.reloading) SFX.reloadEnd();
+
   myHp = p.hp;
   myAlive = p.alive;
   myReloading = p.reloading;
+  myAmmo = p.ammo;
 
   hpSpan.textContent = Math.max(0, Math.round(p.hp));
   healthEl.classList.toggle("low", p.hp <= 30);
@@ -397,8 +407,18 @@ setInterval(() => {
   // authoritative for actual hits). Predicting the cadence locally keeps the feedback instant.
   if (shooting && !myReloading && performance.now() - lastShotAt >= FIRE_MS) {
     lastShotAt = performance.now();
-    spawnTracer();
-    recoil = 1;
+    if (myAmmo > 0) {
+      spawnTracer();
+      recoil = 1;
+      SFX.shoot("rifle");
+    } else {
+      SFX.dryFire();
+    }
+  }
+
+  // Footsteps while actually moving, locked in, and alive.
+  if (active && (input.fwd || input.back || input.left || input.right)) {
+    SFX.footstepThrottled(320);
   }
 }, 1000 / 60);
 
