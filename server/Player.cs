@@ -1,14 +1,18 @@
+using System.Collections.Concurrent;
 using System.Net.WebSockets;
 
 namespace BlockBlitz.Server;
 
 /// <summary>
 /// Server-side state for one connected player. Position/orientation are owned and mutated
-/// only by the game tick loop; <see cref="Latest"/> is written by the client's receive loop
-/// and read by the tick loop, so access to it goes through a volatile read/write.
+/// only by the game tick loop. Inputs arrive on the receive-loop thread via <see cref="Inputs"/>
+/// (a concurrent queue) and are drained by the tick loop.
 /// </summary>
 public sealed class Player
 {
+    /// <summary>Ticks of position history kept for lag compensation (~1s at 60Hz).</summary>
+    public const int HistorySize = 64;
+
     public required string Id { get; init; }
     public required WebSocket Socket { get; init; }
 
@@ -35,12 +39,15 @@ public sealed class Player
     public uint NextShotTick;    // earliest tick this player may fire again
     public uint RespawnTick;     // tick at which a dead player respawns
 
-    private InputMessage _latest = InputMessage.Empty;
+    /// <summary>Inputs queued by the receive loop, drained by the tick loop.</summary>
+    public readonly ConcurrentQueue<InputMessage> Inputs = new();
 
-    /// <summary>Most recent input from this client. Thread-safe reference swap.</summary>
-    public InputMessage Latest
-    {
-        get => Volatile.Read(ref _latest);
-        set => Volatile.Write(ref _latest, value);
-    }
+    /// <summary>The last input this client sent, used for firing/reload after movement is applied.</summary>
+    public InputMessage Latest = InputMessage.Empty;
+
+    /// <summary>Seq of the last input the server has processed — echoed to the client as the ack.</summary>
+    public uint AckSeq;
+
+    /// <summary>Position history for lag compensation, indexed by (tick % HistorySize).</summary>
+    public readonly (uint Tick, float X, float Z)[] Hist = new (uint, float, float)[HistorySize];
 }

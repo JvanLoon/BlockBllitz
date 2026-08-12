@@ -77,6 +77,8 @@ public sealed class GameServer : BackgroundService
             sendRate = SendRate,
             magSize = MagSize,
             arenaHalf = ArenaHalf,
+            moveSpeed = MoveSpeed,
+            playerRadius = PlayerRadius,
             obstacles = Arena.Obstacles.Select(o => new
             {
                 x = o.X, z = o.Z, hx = o.HalfX, hz = o.HalfZ, h = o.Height,
@@ -128,7 +130,7 @@ public sealed class GameServer : BackgroundService
                 else
                 {
                     var input = JsonSerializer.Deserialize<InputMessage>(text, Json);
-                    if (input is not null) player.Latest = input;
+                    if (input is not null) player.Inputs.Enqueue(input);
                 }
             }
             catch (JsonException) { /* ignore malformed message */ }
@@ -201,37 +203,47 @@ public sealed class GameServer : BackgroundService
 
         foreach (var p in _players.Values)
         {
-            var inp = p.Latest;
-            p.Yaw = inp.Yaw;
-            p.Pitch = inp.Pitch;
+            // Drain every input received since last tick, applying each exactly once so the client's
+            // prediction (which does the same) stays in agreement. Cap to bound a flood.
+            int applied = 0;
+            while (applied < 16 && p.Inputs.TryDequeue(out var qi))
+            {
+                p.Latest = qi;
+                p.AckSeq = qi.Seq;
+                p.Yaw = qi.Yaw;
+                p.Pitch = qi.Pitch;
+                if (p.Alive) MovePlayer(p, qi, dt);
+                applied++;
+            }
 
-            // Respawn timer for the dead.
+            // Respawn timer for the dead (they don't move or shoot).
             if (!p.Alive)
             {
                 if (_tick >= p.RespawnTick) Spawn(p);
+                RecordHistory(p);
                 continue;
             }
 
-            MovePlayer(p, inp, dt);
+            var inp = p.Latest;
 
-            // Reloading (server-authoritative): finish an in-progress reload, or start one when
-            // requested (or automatically when trying to fire on empty) and the mag isn't full.
+            // Reloading: finish an in-progress reload, or start one when requested (or
+            // automatically when trying to fire on empty) and the mag isn't full.
             if (p.Reloading)
             {
                 if (_tick >= p.ReloadDoneTick) { p.Ammo = MagSize; p.Reloading = false; }
             }
-            else if ((inp.Reload || (inp.Fire && p.Ammo == 0)) && p.Ammo < MagSize)
+            else if (applied > 0 && (inp.Reload || (inp.Fire && p.Ammo == 0)) && p.Ammo < MagSize)
             {
                 p.Reloading = true;
                 p.ReloadDoneTick = _tick + (uint)ReloadTicks;
             }
 
             // Firing: server owns the fire-rate cooldown and ammo so clients can't cheat either.
-            if (inp.Fire && !p.Reloading && p.Ammo > 0 && _tick >= p.NextShotTick)
+            if (applied > 0 && inp.Fire && !p.Reloading && p.Ammo > 0 && _tick >= p.NextShotTick)
             {
                 p.NextShotTick = _tick + (uint)FireIntervalTicks;
                 p.Ammo--;
-                if (TryHitscan(p, out var target))
+                if (TryHitscan(p, inp.RenderTick, out var target))
                 {
                     target.Health -= ShotDamage;
                     hitShooters.Add(p);
@@ -245,9 +257,29 @@ public sealed class GameServer : BackgroundService
                     }
                 }
             }
+
+            RecordHistory(p);
         }
 
         return hitShooters;
+    }
+
+    private void RecordHistory(Player p) => p.Hist[_tick % Player.HistorySize] = (_tick, p.X, p.Z);
+
+    /// <summary>Rewinds a target to the fractional tick the shooter was rendering it at (lag comp).</summary>
+    private (float X, float Z) RewindTarget(Player t, float renderTick)
+    {
+        // Fall back to the live position when the client didn't send a usable render tick.
+        if (renderTick <= 0f || renderTick >= _tick) return (t.X, t.Z);
+
+        int t0 = (int)MathF.Floor(renderTick);
+        int t1 = t0 + 1;
+        var r0 = t.Hist[((t0 % Player.HistorySize) + Player.HistorySize) % Player.HistorySize];
+        var r1 = t.Hist[((t1 % Player.HistorySize) + Player.HistorySize) % Player.HistorySize];
+        if (r0.Tick != (uint)t0) return (t.X, t.Z);   // history rolled over / too old
+        if (r1.Tick != (uint)t1) return (r0.X, r0.Z); // no next sample yet
+        float f = renderTick - t0;
+        return (r0.X + (r1.X - r0.X) * f, r0.Z + (r1.Z - r0.Z) * f);
     }
 
     private static void MovePlayer(Player p, InputMessage inp, float dt)
@@ -316,7 +348,7 @@ public sealed class GameServer : BackgroundService
     /// Casts a ray from the shooter's eye along their view direction and returns the nearest
     /// alive player it hits within range. No lag compensation yet (Phase 4) — uses live positions.
     /// </summary>
-    private bool TryHitscan(Player shooter, out Player hit)
+    private bool TryHitscan(Player shooter, float renderTick, out Player hit)
     {
         hit = null!;
 
@@ -342,9 +374,12 @@ public sealed class GameServer : BackgroundService
         {
             if (ReferenceEquals(t, shooter) || !t.Alive) continue;
 
+            // Lag compensation: test against where the shooter actually saw the target.
+            var (tx, tz) = RewindTarget(t, renderTick);
+
             if (RayAabb(ox, oy, oz, dx, dy, dz,
-                        t.X - BoxHalfXZ, BoxBottom, t.Z - BoxHalfXZ,
-                        t.X + BoxHalfXZ, BoxTop, t.Z + BoxHalfXZ,
+                        tx - BoxHalfXZ, BoxBottom, tz - BoxHalfXZ,
+                        tx + BoxHalfXZ, BoxTop, tz + BoxHalfXZ,
                         out float dist) && dist < best)
             {
                 best = dist;   // closer players also occlude players behind them
@@ -416,6 +451,7 @@ public sealed class GameServer : BackgroundService
                 hp = p.Health, alive = p.Alive,
                 ammo = p.Ammo, reloading = p.Reloading,
                 kills = p.Kills, deaths = p.Deaths,
+                seq = p.AckSeq,   // reconciliation ack for the owning client
             }).ToArray(),
         };
 

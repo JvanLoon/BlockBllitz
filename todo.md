@@ -47,16 +47,18 @@ bolt-on later instead of a rewrite.
 - [x] Verify (cross-tab): never penetrates cover; shots blocked by wall (0 hits) but land with clear LOS;
       ammo 30→0→reload→30; kills/deaths increment; names + tags propagate
 
-## Phase 4 — Netcode quality (DO BEFORE going live over the tunnel)
-> Not needed on LAN (~0 latency) for *responsiveness*. But note *smoothness* (high-refresh
-> display vs low network rate) shows up even on LAN — see the strafe-judder issue.
-> Interim mitigation applied: broadcast bumped to 60Hz. Real fix is prediction + interpolation below.
-- [ ] Client-side prediction of own movement
-- [ ] Server reconciliation (correct client when it mispredicts)
-- [ ] Entity interpolation for other players (render slightly in the past, smooth)
-- [ ] Lag compensation for hitscan (server rewinds targets to shooter's view time)
-- [ ] Switch JSON -> binary serialization for bandwidth/perf
-- [ ] Snapshot/delta compression (only send what changed)
+## Phase 4 — Netcode quality (DO BEFORE going live over the tunnel)  ✅ CORE DONE
+> Smoothness (high-refresh display vs low network rate) was the strafe judder — now fixed by
+> prediction + interpolation. Server processes a per-player input queue with seq/ack.
+- [x] Client-side prediction of own movement (identical sim math client+server; camera from predicted pos)
+- [x] Server reconciliation (per-player input queue, seq/ack; client replays unacked inputs)
+      Verified: error 0.1u while moving, 0 at rest, pending inputs bounded — no drift/snap.
+- [x] Entity interpolation for other players (render ~100ms in the past; verified 96ms, fractional renderTick)
+- [x] Lag compensation for hitscan (server keeps 64-tick position history, rewinds targets to the
+      shooter's renderTick). Hit-reg verified; full moving-target benefit needs real WAN latency to see.
+- [ ] Switch JSON -> binary serialization for bandwidth/perf  (DEFERRED: pure optimization, no feel
+      impact; adds protocol fragility. Revisit only if bandwidth becomes a real constraint.)
+- [ ] Snapshot/delta compression (only send what changed)     (DEFERRED: same rationale.)
 
 ## Phase 5 — Ship (Cloudflare tunnel)
 - [ ] Dockerize server; server serves the built client static files

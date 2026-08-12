@@ -140,6 +140,23 @@ let latestPlayers = [];  // last state snapshot, for the scoreboard
 let lastShotAt = 0;      // cosmetic tracer cadence (ms)
 const FIRE_MS = 120;     // matches the server's fire interval
 
+// ---- Prediction / interpolation state -------------------------------------
+
+const DT = 1 / 60;             // must match the server tick step
+let MOVE_SPEED = 6;            // from welcome (server authority)
+let PLAYER_RADIUS = 0.4;       // from welcome
+let ARENA_HALF = 19;           // from welcome
+let clientObstacles = [];      // [{x, z, hx, hz}] for local collision (mirrors the server)
+
+let predX = 0, predZ = 0;      // our locally-predicted position
+let predInit = false;
+let inputSeq = 0;
+const pendingInputs = [];      // {seq, input} not yet acknowledged by the server
+
+const INTERP_DELAY = 100;      // ms: render other players this far in the past
+const snapshots = [];          // {t, tick, players} buffer for interpolation
+let currentRenderTick = 0;     // fractional server tick we're showing others at (for lag comp)
+
 // Restore last-used name.
 nameInput.value = localStorage.getItem("blockblitz-name") || "";
 nameInput.focus();
@@ -210,6 +227,35 @@ document.addEventListener("mousemove", (e) => {
   pitch = Math.max(-limit, Math.min(limit, pitch));
 });
 
+// ---- Shared movement simulation (must match the server exactly) -----------
+
+function blockedAt(x, z) {
+  for (const o of clientObstacles) {
+    if (Math.abs(x - o.x) < o.hx + PLAYER_RADIUS && Math.abs(z - o.z) < o.hz + PLAYER_RADIUS)
+      return true;
+  }
+  return false;
+}
+
+function simulateMove(x, z, inp) {
+  const mx = (inp.right ? 1 : 0) - (inp.left ? 1 : 0);
+  const mz = (inp.fwd ? 1 : 0) - (inp.back ? 1 : 0);
+  if (mx === 0 && mz === 0) return { x, z };
+
+  const sin = Math.sin(inp.yaw), cos = Math.cos(inp.yaw);
+  let dx = sin * mz + cos * mx;
+  let dz = cos * mz - sin * mx;
+  const len = Math.hypot(dx, dz);
+  dx /= len; dz /= len;
+
+  const clamp = (v) => Math.max(-ARENA_HALF, Math.min(ARENA_HALF, v));
+  const nx = clamp(x + dx * MOVE_SPEED * DT);
+  if (!blockedAt(nx, z)) x = nx;
+  const nz = clamp(z + dz * MOVE_SPEED * DT);
+  if (!blockedAt(x, nz)) z = nz;
+  return { x, z };
+}
+
 // ---- Networking -----------------------------------------------------------
 
 let myId = null;
@@ -230,7 +276,12 @@ ws.addEventListener("message", (ev) => {
     sendRate = msg.sendRate;
     magSize = msg.magSize || magSize;
     ammoMag.textContent = magSize;
-    buildObstacles(msg.obstacles || []);
+    if (msg.moveSpeed) MOVE_SPEED = msg.moveSpeed;
+    if (msg.playerRadius) PLAYER_RADIUS = msg.playerRadius;
+    if (msg.arenaHalf) ARENA_HALF = msg.arenaHalf;
+    const obs = msg.obstacles || [];
+    clientObstacles = obs.map((o) => ({ x: o.x, z: o.z, hx: o.hx, hz: o.hz }));
+    buildObstacles(obs);
   } else if (msg.type === "state") {
     applyState(msg);
   } else if (msg.type === "hit") {
@@ -247,22 +298,21 @@ function showHitmarker() {
 
 function applyState(msg) {
   latestPlayers = msg.players;
+
+  // Buffer this snapshot for entity interpolation (positions are applied in the render loop).
+  snapshots.push({ t: performance.now(), tick: msg.tick, players: msg.players });
+  while (snapshots.length > 2 && snapshots[0].t < performance.now() - 1000) snapshots.shift();
+
   const seen = new Set();
   for (const p of msg.players) {
     seen.add(p.id);
     if (p.id === myId) {
-      // Authoritative position for our own camera; height stays fixed for now.
-      camera.position.set(p.x, EYE_HEIGHT, p.z);
+      reconcile(p);   // prediction correction (camera position set from predX/predZ each frame)
       updateSelf(p);
       continue;
     }
-    let mesh = others.get(p.id);
-    if (!mesh) { mesh = makePlayerBox(p.id); others.set(p.id, mesh); }
-    mesh.position.set(p.x, p.y, p.z);
-    mesh.rotation.y = p.yaw;
-    mesh.setEnabled(p.alive); // dead players vanish until they respawn
-
-    // Name tag (positioned each frame in the render loop).
+    // Ensure a mesh + name tag exist; positioning happens during interpolation.
+    if (!others.has(p.id)) others.set(p.id, makePlayerBox(p.id));
     let tag = tags.get(p.id);
     if (!tag) {
       tag = document.createElement("div");
@@ -286,6 +336,16 @@ function applyState(msg) {
   if (scoreboardVisible) renderScoreboard();
 }
 
+// Reconciliation: snap to the authoritative position, then re-apply inputs the server hasn't
+// acknowledged yet. On LAN the correction is ~0, so this is invisible; over WAN it self-corrects.
+function reconcile(me) {
+  if (!predInit) { predX = me.x; predZ = me.z; predInit = true; }
+  while (pendingInputs.length && pendingInputs[0].seq <= me.seq) pendingInputs.shift();
+  let x = me.x, z = me.z;
+  for (const pi of pendingInputs) ({ x, z } = simulateMove(x, z, pi.input));
+  predX = x; predZ = z;
+}
+
 function updateSelf(p) {
   // Damage flash when our health drops.
   if (p.hp < myHp - 0.01) {
@@ -307,13 +367,14 @@ function updateSelf(p) {
   crosshair.classList.toggle("hidden", !p.alive || !pointerLocked);
 }
 
-// Send our input at the server's send rate (enough to be responsive without spamming).
+// One input tick: build the input, predict our own movement locally, buffer it for
+// reconciliation, and send it. Runs at the server tick rate so prediction stays in step.
 setInterval(() => {
   if (ws.readyState !== WebSocket.OPEN) return;
-  const active = pointerLocked;                       // only control the player while locked
+  const active = pointerLocked && myAlive;             // only move while locked & alive
   const shooting = firing && pointerLocked && myAlive;
-  ws.send(JSON.stringify({
-    type: "input",
+
+  const input = {
     fwd: active && !!keys["KeyW"],
     back: active && !!keys["KeyS"],
     left: active && !!keys["KeyA"],
@@ -322,7 +383,15 @@ setInterval(() => {
     reload: active && !!keys["KeyR"],
     yaw,
     pitch,
-  }));
+    seq: ++inputSeq,
+    renderTick: currentRenderTick,
+  };
+
+  // Predict immediately for instant, smooth local movement.
+  if (predInit) ({ x: predX, z: predZ } = simulateMove(predX, predZ, input));
+  pendingInputs.push({ seq: input.seq, input });
+
+  ws.send(JSON.stringify({ type: "input", ...input }));
 
   // Cosmetic only: spawn a tracer + recoil at roughly the server fire rate (the server is
   // authoritative for actual hits). Predicting the cadence locally keeps the feedback instant.
@@ -357,6 +426,10 @@ const hud = document.getElementById("hud");
 engine.runRenderLoop(() => {
   // Looking is local & instant. Babylon UniversalCamera uses Euler (pitch, yaw, roll).
   camera.rotation.set(pitch, yaw, 0);
+  // Our own position comes from client-side prediction (smooth at full framerate).
+  if (predInit) camera.position.set(predX, EYE_HEIGHT, predZ);
+
+  interpolateOthers();
 
   // Weapon viewmodel: recoil kick decays back to rest; dip while reloading.
   recoil += (0 - recoil) * 0.25;
@@ -370,6 +443,47 @@ engine.runRenderLoop(() => {
   hud.textContent =
     `${connected ? "online" : "offline"} · ${others.size + (myId ? 1 : 0)} players · ${engine.getFps().toFixed(0)} fps`;
 });
+
+// Render other players ~INTERP_DELAY in the past, sliding between the two snapshots that
+// straddle that moment. Also computes the render tick we send for lag compensation.
+function interpolateOthers() {
+  if (snapshots.length === 0) return;
+  const renderTime = performance.now() - INTERP_DELAY;
+
+  let a = snapshots[0], b = snapshots[0];
+  if (renderTime >= snapshots[snapshots.length - 1].t) {
+    a = b = snapshots[snapshots.length - 1];
+  } else {
+    for (let i = 0; i < snapshots.length - 1; i++) {
+      if (snapshots[i].t <= renderTime && renderTime <= snapshots[i + 1].t) { a = snapshots[i]; b = snapshots[i + 1]; break; }
+    }
+  }
+  const span = b.t - a.t;
+  const f = span > 0 ? (renderTime - a.t) / span : 0;
+  currentRenderTick = a.tick + (b.tick - a.tick) * f;
+
+  for (const [id, mesh] of others) {
+    const pa = a.players.find((p) => p.id === id);
+    const pb = b.players.find((p) => p.id === id);
+    const st = pb || pa;
+    if (!st) { mesh.setEnabled(false); continue; }
+    mesh.setEnabled(st.alive);
+    if (!st.alive) continue;
+    if (pa && pb) {
+      mesh.position.set(pa.x + (pb.x - pa.x) * f, pa.y + (pb.y - pa.y) * f, pa.z + (pb.z - pa.z) * f);
+      mesh.rotation.y = lerpAngle(pa.yaw, pb.yaw, f);
+    } else {
+      mesh.position.set(st.x, st.y, st.z);
+      mesh.rotation.y = st.yaw;
+    }
+  }
+}
+
+function lerpAngle(a, b, f) {
+  let d = ((b - a + Math.PI) % (2 * Math.PI)) - Math.PI;
+  if (d < -Math.PI) d += 2 * Math.PI;
+  return a + d * f;
+}
 
 // Project each visible player's head position to screen space and place its name tag there.
 function updateNametags() {

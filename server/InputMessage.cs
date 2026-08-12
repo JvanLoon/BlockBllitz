@@ -15,5 +15,11 @@ public sealed record InputMessage
     public float Yaw { get; init; }
     public float Pitch { get; init; }
 
+    /// <summary>Client-assigned, monotonically increasing. Echoed back as the ack for reconciliation.</summary>
+    public uint Seq { get; init; }
+
+    /// <summary>The (fractional) server tick the client was rendering other players at — used for lag compensation.</summary>
+    public float RenderTick { get; init; }
+
     public static readonly InputMessage Empty = new();
 }
