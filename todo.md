@@ -79,7 +79,11 @@ bolt-on later instead of a rewrite.
       dry-fire/hitmarker/damage/death/footstep/switch, see `client/audio.js`
 - [x] Multiple weapons — Pistol/SMG/Rifle/Shotgun, server-authoritative (`server/Weapons.cs`),
       switch with 1-4, shotgun does multi-pellet spread, pistol is semi-auto (edge-triggered)
-- [ ] Simple player/weapon models (currently primitive boxes; see in-progress work)
+- [x] Simple player/weapon models — no asset pipeline, so both are built from Babylon
+      primitives (boxes + a cylinder barrel), matching the game's existing low-poly look:
+      4 distinct weapon shapes shared between the first-person viewmodel and what other
+      players are shown holding (`buildWeaponMesh` in `client/game.js`), and a torso/head/
+      arm player silhouette sized to match the server hitbox exactly.
 - [ ] Game modes (TDM, FFA, rounds)
 - [ ] Simple lobby / room codes for private matches
 - [ ] Spectator mode

@@ -48,19 +48,106 @@ const pillarColors = [
   p.material = m;
 });
 
-// ---- Weapon viewmodel -----------------------------------------------------
+// ---- Weapon models ----------------------------------------------------------
+//
+// Every weapon is a handful of Babylon primitives (boxes + a cylinder barrel) — same
+// low-poly aesthetic as the arena cover and player boxes, no external model files. One
+// builder function is shared by the first-person viewmodel (parented to the camera) and
+// the guns other players are shown holding (parented to their player mesh), so a weapon
+// only needs to be described once.
 
-const gun = BABYLON.MeshBuilder.CreateBox("gun", { width: 0.12, height: 0.14, depth: 0.5 }, scene);
-gun.parent = camera;
-const GUN_BASE = new BABYLON.Vector3(0.22, -0.2, 0.6);
-gun.position.copyFrom(GUN_BASE);
+const WEAPON_KINDS = ["pistol", "smg", "rifle", "shotgun"];
+
 const gunMat = new BABYLON.StandardMaterial("gunMat", scene);
 gunMat.diffuseColor = new BABYLON.Color3(0.12, 0.13, 0.16);
 gunMat.emissiveColor = new BABYLON.Color3(0.04, 0.04, 0.05);
-gun.material = gunMat;
-gun.isPickable = false;
-gun.renderingGroupId = 1; // draw over the world so it never clips into cover
-let recoil = 0;           // 0..1, decays each frame
+
+const stockMat = new BABYLON.StandardMaterial("stockMat", scene);
+stockMat.diffuseColor = new BABYLON.Color3(0.32, 0.2, 0.11);
+stockMat.emissiveColor = new BABYLON.Color3(0.08, 0.05, 0.03);
+
+// A small accent color per weapon (on the mag/tip) so opponents' loadouts read at a glance.
+const WEAPON_ACCENTS = [
+  new BABYLON.Color3(0.4, 0.9, 1.0),  // pistol - cyan
+  new BABYLON.Color3(1.0, 0.85, 0.3), // smg - yellow
+  new BABYLON.Color3(1.0, 0.55, 0.2), // rifle - orange
+  new BABYLON.Color3(1.0, 0.3, 0.3),  // shotgun - red
+];
+const accentMats = WEAPON_ACCENTS.map((c, i) => {
+  const m = new BABYLON.StandardMaterial("accent" + i, scene);
+  m.diffuseColor = c.scale(0.6);
+  m.emissiveColor = c.scale(0.5);
+  return m;
+});
+
+function wbox(root, name, w, h, d, x, y, z, mat) {
+  const b = BABYLON.MeshBuilder.CreateBox(name, { width: w, height: h, depth: d }, scene);
+  b.parent = root;
+  b.position.set(x, y, z);
+  b.material = mat;
+  b.isPickable = false;
+  return b;
+}
+function wcyl(root, name, radius, len, x, y, z, mat) {
+  const c = BABYLON.MeshBuilder.CreateCylinder(name, { diameter: radius * 2, height: len, tessellation: 8 }, scene);
+  c.parent = root;
+  c.position.set(x, y, z);
+  c.rotation.x = Math.PI / 2; // barrel points along local +Z (forward)
+  c.material = mat;
+  c.isPickable = false;
+  return c;
+}
+
+/** Builds one weapon's geometry as children of `root`. Local +Z = forward, grip ~at origin. */
+function buildWeaponMesh(root, kind, weaponIdx) {
+  const accent = accentMats[weaponIdx] || accentMats[0];
+  switch (kind) {
+    case "pistol":
+      wbox(root, "body", 0.09, 0.11, 0.24, 0, 0, 0.1, gunMat);
+      wbox(root, "grip", 0.08, 0.16, 0.08, 0, -0.13, -0.02, gunMat);
+      wbox(root, "tip", 0.09, 0.03, 0.03, 0, 0.045, 0.24, accent);
+      break;
+    case "smg":
+      wbox(root, "body", 0.09, 0.12, 0.32, 0, 0, 0.05, gunMat);
+      wcyl(root, "barrel", 0.018, 0.16, 0, 0.01, 0.28, gunMat);
+      wbox(root, "mag", 0.05, 0.18, 0.06, 0, -0.14, 0.08, accent);
+      wbox(root, "stock", 0.06, 0.08, 0.12, 0, 0, -0.18, gunMat);
+      break;
+    case "rifle":
+      wbox(root, "body", 0.1, 0.12, 0.42, 0, 0, 0.08, gunMat);
+      wcyl(root, "barrel", 0.022, 0.26, 0, 0.01, 0.36, gunMat);
+      wbox(root, "mag", 0.06, 0.22, 0.07, 0, -0.16, 0.1, accent);
+      wbox(root, "stock", 0.07, 0.1, 0.18, 0, 0, -0.24, gunMat);
+      break;
+    case "shotgun":
+      wbox(root, "body", 0.11, 0.13, 0.3, 0, 0, 0.02, gunMat);
+      wcyl(root, "barrel", 0.032, 0.32, 0, 0.02, 0.32, gunMat);
+      wbox(root, "pump", 0.1, 0.09, 0.14, 0, -0.03, 0.22, accent);
+      wbox(root, "stock", 0.09, 0.11, 0.24, 0, 0, -0.24, stockMat);
+      break;
+  }
+}
+
+// ---- First-person viewmodel: one root per weapon, swapped on switch -------
+
+const WEAPON_VIEW_BASE = [
+  new BABYLON.Vector3(0.22, -0.18, 0.42), // pistol - compact, held close
+  new BABYLON.Vector3(0.22, -0.2, 0.5),
+  new BABYLON.Vector3(0.24, -0.2, 0.58),
+  new BABYLON.Vector3(0.24, -0.22, 0.5),  // shotgun
+];
+const WEAPON_RECOIL_SCALE = [0.7, 0.9, 1.0, 1.6]; // shotgun kicks hardest
+
+const gunRoots = WEAPON_KINDS.map((kind, i) => {
+  const root = new BABYLON.TransformNode("gunRoot" + i, scene);
+  root.parent = camera;
+  root.position.copyFrom(WEAPON_VIEW_BASE[i]);
+  buildWeaponMesh(root, kind, i);
+  for (const m of root.getChildMeshes()) m.renderingGroupId = 1; // draw over the world, never clips into cover
+  root.setEnabled(i === 0);
+  return root;
+});
+let recoil = 0; // 0..1, decays each frame
 
 // ---- Arena cover (sent by the server) -------------------------------------
 
@@ -82,28 +169,46 @@ function buildObstacles(list) {
 
 // ---- Player meshes --------------------------------------------------------
 
-/** @type {Map<string, BABYLON.Mesh>} id -> box mesh for other players */
+/** @type {Map<string, BABYLON.TransformNode>} id -> root node for other players */
 const others = new Map();
 /** @type {Map<string, HTMLElement>} id -> floating name tag */
 const tags = new Map();
 
+// Simple humanoid silhouette (torso + head + arms), sized to stay within the server's
+// hitbox envelope (0.8 x 1.0 x 0.8, see BoxHalfXZ/BoxTop in GameServer.cs) so what you
+// see lines up with what you hit.
 function makePlayerBox(id) {
-  const box = BABYLON.MeshBuilder.CreateBox("p_" + id, { width: 0.8, depth: 0.8, height: 1.0 }, scene);
-  const mat = new BABYLON.StandardMaterial("pmat_" + id, scene);
+  const root = new BABYLON.TransformNode("p_" + id, scene);
+
   // Deterministic-ish color from the id so each player looks distinct.
   let h = 0;
   for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) & 0xffff;
   const col = BABYLON.Color3.FromHSV((h % 360), 0.6, 0.95);
+  const mat = new BABYLON.StandardMaterial("pmat_" + id, scene);
   mat.diffuseColor = col;
   mat.emissiveColor = col.scale(0.35);
-  box.material = mat;
+  const faceMat = new BABYLON.StandardMaterial("pface_" + id, scene);
+  faceMat.diffuseColor = BABYLON.Color3.White();
+  faceMat.emissiveColor = col.scale(0.7);
 
-  // A small "nose" so facing direction is visible.
-  const nose = BABYLON.MeshBuilder.CreateBox("nose_" + id, { width: 0.2, depth: 0.4, height: 0.2 }, scene);
-  nose.parent = box;
-  nose.position.set(0, 0.3, 0.5);
-  nose.material = mat;
-  return box;
+  // Note: the server reports each player's Y as a fixed 0.5 (the hitbox's vertical center,
+  // see Player.Y in Player.cs), so these local offsets are relative to that center, not
+  // to the ground — e.g. local y=-0.1 puts the torso's world center at 0.4.
+  wbox(root, "torso_" + id, 0.6, 0.8, 0.5, 0, -0.1, 0, mat);
+  wbox(root, "head_" + id, 0.4, 0.2, 0.4, 0, 0.4, 0, mat);
+  // Bright marker on the front of the head so facing direction reads at a glance.
+  wbox(root, "visor_" + id, 0.24, 0.1, 0.04, 0, 0.4, 0.21, faceMat);
+  wbox(root, "armL_" + id, 0.15, 0.55, 0.18, -0.38, -0.1, 0, mat);
+  wbox(root, "armR_" + id, 0.15, 0.55, 0.18, 0.38, -0.1, 0, mat);
+
+  // Held weapon: rebuilt in applyState() whenever this player's reported weapon changes.
+  const heldGunRoot = new BABYLON.TransformNode("held_" + id, scene);
+  heldGunRoot.parent = root;
+  heldGunRoot.position.set(0.3, 0.05, 0.32);
+  root.heldWeapon = -1;
+  root.heldGunRoot = heldGunRoot;
+
+  return root;
 }
 
 // ---- Input & look ---------------------------------------------------------
@@ -241,6 +346,7 @@ window.addEventListener("keydown", (e) => {
   const idx = WEAPON_KEYS[e.code];
   if (idx === undefined || idx === myWeapon || !weaponDefs[idx]) return;
   myWeapon = idx;
+  for (let i = 0; i < gunRoots.length; i++) gunRoots[i].setEnabled(i === idx);
   SFX.switchWeapon();
 });
 
@@ -334,6 +440,12 @@ function applyState(msg) {
     }
     // Ensure a mesh + name tag exist; positioning happens during interpolation.
     if (!others.has(p.id)) others.set(p.id, makePlayerBox(p.id));
+    const mesh = others.get(p.id);
+    if (mesh.heldWeapon !== p.weapon && WEAPON_KINDS[p.weapon]) {
+      mesh.heldWeapon = p.weapon;
+      for (const c of mesh.heldGunRoot.getChildMeshes()) c.dispose();
+      buildWeaponMesh(mesh.heldGunRoot, WEAPON_KINDS[p.weapon], p.weapon);
+    }
     let tag = tags.get(p.id);
     if (!tag) {
       tag = document.createElement("div");
@@ -487,8 +599,11 @@ engine.runRenderLoop(() => {
   // Weapon viewmodel: recoil kick decays back to rest; dip while reloading.
   recoil += (0 - recoil) * 0.25;
   const dip = myReloading ? 0.18 : 0;
-  gun.position.set(GUN_BASE.x, GUN_BASE.y - dip, GUN_BASE.z - recoil * 0.12);
-  gun.rotation.set(-recoil * 0.5 + dip * 1.2, 0, 0);
+  const base = WEAPON_VIEW_BASE[myWeapon];
+  const kick = WEAPON_RECOIL_SCALE[myWeapon];
+  const activeGun = gunRoots[myWeapon];
+  activeGun.position.set(base.x, base.y - dip, base.z - recoil * 0.12 * kick);
+  activeGun.rotation.set(-recoil * 0.5 * kick + dip * 1.2, 0, 0);
 
   scene.render();
   updateNametags();
