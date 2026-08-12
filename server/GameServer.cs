@@ -35,6 +35,13 @@ public sealed class GameServer : BackgroundService
     private const float BoxBottom = 0f;
     private const float BoxTop = 1.0f;
 
+    // Weapon pickups: walk within this radius of a pad's centre while it's available to claim
+    // its gun; it then goes on cooldown and reappears later.
+    private const float PickupRadius = 1.1f;
+    private static readonly uint PickupRespawnTicks = TickRate * 25; // 25s
+    private readonly bool[] _pickupAvailable = Arena.WeaponPickups.Select(_ => true).ToArray();
+    private readonly uint[] _pickupRespawnTick = new uint[Arena.WeaponPickups.Length];
+
     private static readonly JsonSerializerOptions Json = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -101,7 +108,9 @@ public sealed class GameServer : BackgroundService
                 fireMs = w.FireIntervalTicks * 1000 / TickRate,
                 reloadMs = w.ReloadTicks * 1000 / TickRate,
                 semiAuto = w.SemiAuto,
+                infiniteAmmo = w.InfiniteAmmo,
             }).ToArray(),
+            weaponPickups = Arena.WeaponPickups.Select(p => new { x = p.X, z = p.Z, weapon = p.Weapon }).ToArray(),
         }, ct);
 
         _players[player.Id] = player;
@@ -235,6 +244,9 @@ public sealed class GameServer : BackgroundService
     {
         var hitShooters = new List<Player>();
 
+        for (int i = 0; i < Arena.WeaponPickups.Length; i++)
+            if (!_pickupAvailable[i] && _tick >= _pickupRespawnTick[i]) _pickupAvailable[i] = true;
+
         foreach (var p in _players.Values)
         {
             // Drain every input received since last tick, applying each exactly once so the client's
@@ -258,11 +270,26 @@ public sealed class GameServer : BackgroundService
                 continue;
             }
 
+            // Weapon pickups: claim any available pad within reach, granting that gun.
+            for (int i = 0; i < Arena.WeaponPickups.Length; i++)
+            {
+                if (!_pickupAvailable[i]) continue;
+                var pu = Arena.WeaponPickups[i];
+                float dx = p.X - pu.X, dz = p.Z - pu.Z;
+                if (dx * dx + dz * dz > PickupRadius * PickupRadius) continue;
+                if (p.Owned[pu.Weapon]) continue; // already carrying it — leave it for someone else
+                p.Owned[pu.Weapon] = true;
+                p.Ammo[pu.Weapon] = Weapons.All[pu.Weapon].MagSize;
+                _pickupAvailable[i] = false;
+                _pickupRespawnTick[i] = _tick + PickupRespawnTicks;
+            }
+
             var inp = p.Latest;
 
-            // Weapon switch: cancel any reload in progress and impose a short equip delay
-            // before the new weapon can fire, so flicking between weapons isn't a free action.
-            if (applied > 0 && inp.Weapon != p.WeaponIndex)
+            // Weapon switch: only to a weapon this player actually owns. Cancel any reload in
+            // progress and impose a short equip delay before the new weapon can fire, so
+            // flicking between weapons isn't a free action.
+            if (applied > 0 && inp.Weapon != p.WeaponIndex && p.Owned[inp.Weapon])
             {
                 p.WeaponIndex = inp.Weapon;
                 p.Reloading = false;
@@ -271,12 +298,13 @@ public sealed class GameServer : BackgroundService
             var w = Weapons.All[p.WeaponIndex];
 
             // Reloading: finish an in-progress reload, or start one when requested (or
-            // automatically when trying to fire on empty) and the mag isn't full.
+            // automatically when trying to fire on empty) and the mag isn't full. Infinite-ammo
+            // weapons (the knife) never reload.
             if (p.Reloading)
             {
                 if (_tick >= p.ReloadDoneTick) { p.CurrentAmmo = w.MagSize; p.Reloading = false; }
             }
-            else if (applied > 0 && (inp.Reload || (inp.Fire && p.CurrentAmmo == 0)) && p.CurrentAmmo < w.MagSize)
+            else if (!w.InfiniteAmmo && applied > 0 && (inp.Reload || (inp.Fire && p.CurrentAmmo == 0)) && p.CurrentAmmo < w.MagSize)
             {
                 p.Reloading = true;
                 p.ReloadDoneTick = _tick + (uint)w.ReloadTicks;
@@ -284,12 +312,13 @@ public sealed class GameServer : BackgroundService
 
             // Firing: server owns the fire-rate cooldown and ammo so clients can't cheat either.
             // Semi-auto weapons additionally require a fresh press (no holding down for auto-fire).
-            bool wantsFire = applied > 0 && inp.Fire && !p.Reloading && p.CurrentAmmo > 0 && _tick >= p.NextShotTick;
+            bool hasAmmo = w.InfiniteAmmo || p.CurrentAmmo > 0;
+            bool wantsFire = applied > 0 && inp.Fire && !p.Reloading && hasAmmo && _tick >= p.NextShotTick;
             if (w.SemiAuto && p.FireHeldPrev) wantsFire = false;
             if (wantsFire)
             {
                 p.NextShotTick = _tick + (uint)w.FireIntervalTicks;
-                p.CurrentAmmo--;
+                if (!w.InfiniteAmmo) p.CurrentAmmo--;
                 if (FireWeapon(p, w, inp.RenderTick))
                     hitShooters.Add(p);
             }
@@ -532,10 +561,11 @@ public sealed class GameServer : BackgroundService
                 x = p.X, y = p.Y, z = p.Z,
                 yaw = p.Yaw, pitch = p.Pitch,
                 hp = p.Health, alive = p.Alive,
-                ammo = p.CurrentAmmo, reloading = p.Reloading, weapon = p.WeaponIndex,
+                ammo = p.CurrentAmmo, reloading = p.Reloading, weapon = p.WeaponIndex, owned = p.Owned,
                 kills = p.Kills, deaths = p.Deaths,
                 seq = p.AckSeq,   // reconciliation ack for the owning client
             }).ToArray(),
+            pickups = _pickupAvailable,
         };
 
         var bytes = JsonSerializer.SerializeToUtf8Bytes(snapshot, Json);

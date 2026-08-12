@@ -84,6 +84,13 @@ bolt-on later instead of a rewrite.
       4 distinct weapon shapes shared between the first-person viewmodel and what other
       players are shown holding (`buildWeaponMesh` in `client/game.js`), and a torso/head/
       arm player silhouette sized to match the server hitbox exactly.
+- [x] Weapon pickups — players now start with only a knife (melee, infinite ammo, always
+      owned, weapon slot 0). Pistol/SMG/Rifle/Shotgun are gained by walking within ~1.1u of
+      a fixed map location (`Arena.WeaponPickups`), shown as a glowing disc with a
+      slow-spinning copy of the weapon floating above it (reuses `buildWeaponMesh`) so it's
+      obvious what's on offer. Picking one up marks it unavailable for 25s (`server/
+      GameServer.cs`); ownership persists across respawns; the server rejects switching to
+      an unowned weapon. Keys are now 1-5 (knife first).
 - [ ] Game modes (TDM, FFA, rounds)
 - [ ] Simple lobby / room codes for private matches
 - [ ] Spectator mode

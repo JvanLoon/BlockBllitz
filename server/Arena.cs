@@ -3,6 +3,9 @@ namespace BlockBlitz.Server;
 /// <summary>An axis-aligned box obstacle. Vertically spans [0, Height].</summary>
 public readonly record struct Obstacle(float X, float Z, float HalfX, float HalfZ, float Height);
 
+/// <summary>A fixed map location where a specific gun (see Weapons.*) can be picked up.</summary>
+public readonly record struct WeaponPickup(float X, float Z, int Weapon);
+
 /// <summary>
 /// Static arena layout — cover obstacles and spawn points. Single source of truth: the server
 /// uses it for movement collision and hitscan blocking, and sends the obstacle list to clients
@@ -30,5 +33,14 @@ public static class Arena
     {
         (-15f, -15f), (15f, -15f), (-15f, 15f), (15f, 15f),
         (0f, -16f), (0f, 16f), (-16f, 0f), (16f, 0f),
+    };
+
+    // One gun per compass direction around the central wall, clear of every obstacle.
+    public static readonly WeaponPickup[] WeaponPickups =
+    {
+        new(-6f, 0f, Weapons.Pistol),
+        new(6f, 0f, Weapons.Shotgun),
+        new(0f, -6f, Weapons.Smg),
+        new(0f, 6f, Weapons.Rifle),
     };
 }

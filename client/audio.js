@@ -105,6 +105,19 @@ const SFX = (() => {
     noiseBurst({ t, duration: 0.02, filterType: "highpass", freq: 3000, q: 1, gain: 0.35 });
   }
 
+  /** Knife swing: a quick air whoosh, no bang. */
+  function swing() {
+    const t = now();
+    noiseBurst({ t, duration: 0.09, filterType: "bandpass", freq: 1800, q: 0.4, gain: 0.3 });
+  }
+
+  /** Weapon pickup: a bright ascending two-note chime. */
+  function pickup() {
+    const t = now();
+    tone({ t, freq: 700, type: "triangle", duration: 0.09, gain: 0.3 });
+    tone({ t: t + 0.07, freq: 1050, type: "triangle", duration: 0.12, gain: 0.32 });
+  }
+
   function reloadStart() {
     const t = now();
     noiseBurst({ t, duration: 0.05, filterType: "bandpass", freq: 500, q: 3, gain: 0.4 });
@@ -156,5 +169,5 @@ const SFX = (() => {
     footstep();
   }
 
-  return { unlock, shoot, dryFire, reloadStart, reloadEnd, switchWeapon, hitmarker, damage, death, footstepThrottled };
+  return { unlock, shoot, dryFire, swing, pickup, reloadStart, reloadEnd, switchWeapon, hitmarker, damage, death, footstepThrottled };
 })();

@@ -38,10 +38,19 @@ public sealed class Player
     public uint NextShotTick;    // earliest tick this player may fire again
     public uint RespawnTick;     // tick at which a dead player respawns
 
-    // Loadout: all four weapons carried at once, each with its own magazine.
+    // Loadout: everyone starts with just the knife; guns are gained by walking over a
+    // weapon pickup (see Arena.WeaponPickups) and kept across respawns once owned.
     public int WeaponIndex;
+    public readonly bool[] Owned = CreateOwned();
     public readonly int[] Ammo = new int[Weapons.All.Length];
     public bool FireHeldPrev;    // for semi-auto edge detection
+
+    private static bool[] CreateOwned()
+    {
+        var owned = new bool[Weapons.All.Length];
+        owned[Weapons.Knife] = true;
+        return owned;
+    }
 
     public int CurrentAmmo
     {

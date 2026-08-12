@@ -56,7 +56,7 @@ const pillarColors = [
 // the guns other players are shown holding (parented to their player mesh), so a weapon
 // only needs to be described once.
 
-const WEAPON_KINDS = ["pistol", "smg", "rifle", "shotgun"];
+const WEAPON_KINDS = ["knife", "pistol", "smg", "rifle", "shotgun"];
 
 const gunMat = new BABYLON.StandardMaterial("gunMat", scene);
 gunMat.diffuseColor = new BABYLON.Color3(0.12, 0.13, 0.16);
@@ -66,12 +66,17 @@ const stockMat = new BABYLON.StandardMaterial("stockMat", scene);
 stockMat.diffuseColor = new BABYLON.Color3(0.32, 0.2, 0.11);
 stockMat.emissiveColor = new BABYLON.Color3(0.08, 0.05, 0.03);
 
+const bladeMat = new BABYLON.StandardMaterial("bladeMat", scene);
+bladeMat.diffuseColor = new BABYLON.Color3(0.75, 0.78, 0.82);
+bladeMat.emissiveColor = new BABYLON.Color3(0.15, 0.16, 0.18);
+
 // A small accent color per weapon (on the mag/tip) so opponents' loadouts read at a glance.
 const WEAPON_ACCENTS = [
-  new BABYLON.Color3(0.4, 0.9, 1.0),  // pistol - cyan
-  new BABYLON.Color3(1.0, 0.85, 0.3), // smg - yellow
-  new BABYLON.Color3(1.0, 0.55, 0.2), // rifle - orange
-  new BABYLON.Color3(1.0, 0.3, 0.3),  // shotgun - red
+  new BABYLON.Color3(0.85, 0.85, 0.9), // knife - steel
+  new BABYLON.Color3(0.4, 0.9, 1.0),   // pistol - cyan
+  new BABYLON.Color3(1.0, 0.85, 0.3),  // smg - yellow
+  new BABYLON.Color3(1.0, 0.55, 0.2),  // rifle - orange
+  new BABYLON.Color3(1.0, 0.3, 0.3),   // shotgun - red
 ];
 const accentMats = WEAPON_ACCENTS.map((c, i) => {
   const m = new BABYLON.StandardMaterial("accent" + i, scene);
@@ -102,6 +107,11 @@ function wcyl(root, name, radius, len, x, y, z, mat) {
 function buildWeaponMesh(root, kind, weaponIdx) {
   const accent = accentMats[weaponIdx] || accentMats[0];
   switch (kind) {
+    case "knife":
+      wbox(root, "blade", 0.025, 0.03, 0.22, 0, 0.03, 0.15, bladeMat);
+      wbox(root, "guard", 0.07, 0.02, 0.03, 0, 0.03, 0.03, gunMat);
+      wbox(root, "handle", 0.03, 0.05, 0.12, 0, -0.01, -0.05, stockMat);
+      break;
     case "pistol":
       wbox(root, "body", 0.09, 0.11, 0.24, 0, 0, 0.1, gunMat);
       wbox(root, "grip", 0.08, 0.16, 0.08, 0, -0.13, -0.02, gunMat);
@@ -131,12 +141,13 @@ function buildWeaponMesh(root, kind, weaponIdx) {
 // ---- First-person viewmodel: one root per weapon, swapped on switch -------
 
 const WEAPON_VIEW_BASE = [
+  new BABYLON.Vector3(0.16, -0.16, 0.32), // knife - held close & central
   new BABYLON.Vector3(0.22, -0.18, 0.42), // pistol - compact, held close
   new BABYLON.Vector3(0.22, -0.2, 0.5),
   new BABYLON.Vector3(0.24, -0.2, 0.58),
   new BABYLON.Vector3(0.24, -0.22, 0.5),  // shotgun
 ];
-const WEAPON_RECOIL_SCALE = [0.7, 0.9, 1.0, 1.6]; // shotgun kicks hardest
+const WEAPON_RECOIL_SCALE = [0.5, 0.7, 0.9, 1.0, 1.6]; // shotgun kicks hardest, knife jabs lightly
 
 const gunRoots = WEAPON_KINDS.map((kind, i) => {
   const root = new BABYLON.TransformNode("gunRoot" + i, scene);
@@ -165,6 +176,37 @@ function buildObstacles(list) {
     box.isPickable = false;
     obstacleMeshes.push(box);
   }
+}
+
+// ---- Weapon pickups (sent by the server) -----------------------------------
+//
+// Each pad is a small glowing disc on the ground plus a slowly-spinning copy of the
+// weapon it grants (reusing buildWeaponMesh — the pad literally shows what you'll get).
+// Availability (shown/hidden) is driven by the server's `pickups` array each state tick.
+
+/** @type {{disc: BABYLON.Mesh, icon: BABYLON.TransformNode}[]} */
+let pickupVisuals = [];
+
+function buildPickups(list) {
+  for (const pv of pickupVisuals) { pv.disc.dispose(); pv.icon.dispose(); }
+  pickupVisuals = list.map((pu, i) => {
+    const accent = WEAPON_ACCENTS[pu.weapon] || WEAPON_ACCENTS[0];
+    const disc = BABYLON.MeshBuilder.CreateCylinder("pad" + i, { diameter: 1.3, height: 0.04, tessellation: 24 }, scene);
+    disc.position.set(pu.x, 0.03, pu.z);
+    const discMat = new BABYLON.StandardMaterial("padmat" + i, scene);
+    discMat.diffuseColor = accent.scale(0.5);
+    discMat.emissiveColor = accent.scale(0.6);
+    discMat.alpha = 0.85;
+    disc.material = discMat;
+    disc.isPickable = false;
+
+    const icon = new BABYLON.TransformNode("padicon" + i, scene);
+    icon.position.set(pu.x, 0.55, pu.z);
+    buildWeaponMesh(icon, WEAPON_KINDS[pu.weapon], pu.weapon);
+    for (const m of icon.getChildMeshes()) m.isPickable = false;
+
+    return { disc, icon };
+  });
 }
 
 // ---- Player meshes --------------------------------------------------------
@@ -243,8 +285,9 @@ let myHp = 100;
 let myAlive = true;
 let myReloading = false;
 let myAmmo = 30;
-let myWeapon = 0;        // selected weapon slot, 0-3
-let weaponDefs = [];     // [{name, mag, fireMs, reloadMs, semiAuto}] from welcome
+let myWeapon = 0;        // selected weapon slot, 0-4 (0 = knife, always owned)
+let myOwned = [true, false, false, false, false]; // which weapon slots we've picked up
+let weaponDefs = [];     // [{name, mag, fireMs, reloadMs, semiAuto, infiniteAmmo}] from welcome
 let latestPlayers = [];  // last state snapshot, for the scoreboard
 let lastShotAt = 0;      // cosmetic tracer cadence (ms)
 const FIRE_MS = 120;     // fallback cadence before weaponDefs arrives
@@ -338,13 +381,13 @@ document.addEventListener("mousemove", (e) => {
   pitch = Math.max(-limit, Math.min(limit, pitch));
 });
 
-// ---- Weapon switching (1-4) ------------------------------------------------
+// ---- Weapon switching (1-5) ------------------------------------------------
 
-const WEAPON_KEYS = { Digit1: 0, Digit2: 1, Digit3: 2, Digit4: 3 };
+const WEAPON_KEYS = { Digit1: 0, Digit2: 1, Digit3: 2, Digit4: 3, Digit5: 4 };
 window.addEventListener("keydown", (e) => {
   if (!pointerLocked || !myAlive) return;
   const idx = WEAPON_KEYS[e.code];
-  if (idx === undefined || idx === myWeapon || !weaponDefs[idx]) return;
+  if (idx === undefined || idx === myWeapon || !weaponDefs[idx] || !myOwned[idx]) return;
   myWeapon = idx;
   for (let i = 0; i < gunRoots.length; i++) gunRoots[i].setEnabled(i === idx);
   SFX.switchWeapon();
@@ -408,6 +451,7 @@ ws.addEventListener("message", (ev) => {
     const obs = msg.obstacles || [];
     clientObstacles = obs.map((o) => ({ x: o.x, z: o.z, hx: o.hx, hz: o.hz }));
     buildObstacles(obs);
+    buildPickups(msg.weaponPickups || []);
   } else if (msg.type === "state") {
     applyState(msg);
   } else if (msg.type === "hit") {
@@ -429,6 +473,14 @@ function applyState(msg) {
   // Buffer this snapshot for entity interpolation (positions are applied in the render loop).
   snapshots.push({ t: performance.now(), tick: msg.tick, players: msg.players });
   while (snapshots.length > 2 && snapshots[0].t < performance.now() - 1000) snapshots.shift();
+
+  if (msg.pickups) {
+    for (let i = 0; i < pickupVisuals.length; i++) {
+      const available = !!msg.pickups[i];
+      pickupVisuals[i].disc.setEnabled(available);
+      pickupVisuals[i].icon.setEnabled(available);
+    }
+  }
 
   const seen = new Set();
   for (const p of msg.players) {
@@ -490,6 +542,13 @@ function updateSelf(p) {
   if (myAlive && !p.alive) SFX.death();
   if (!myReloading && p.reloading) SFX.reloadStart();
   if (myReloading && !p.reloading) SFX.reloadEnd();
+  // Newly-picked-up weapon(s): p.owned only ever gains entries, never loses them.
+  if (p.owned) {
+    for (let i = 0; i < p.owned.length; i++) {
+      if (p.owned[i] && !myOwned[i]) SFX.pickup();
+    }
+    myOwned = p.owned;
+  }
 
   myHp = p.hp;
   myAlive = p.alive;
@@ -499,15 +558,21 @@ function updateSelf(p) {
   hpSpan.textContent = Math.max(0, Math.round(p.hp));
   healthEl.classList.toggle("low", p.hp <= 30);
 
-  ammoCur.textContent = p.ammo;
-  ammoEl.classList.toggle("empty", p.ammo === 0);
-  ammoEl.classList.toggle("reloading", p.reloading);
-
   // Weapon HUD reflects the server's authoritative slot (it applies switches immediately,
-  // so this only lags our own keypress by one round trip).
+  // so this only lags our own keypress by one round trip). Infinite-ammo weapons (knife)
+  // show an infinity symbol instead of a mag count.
   const wDef = weaponDefs[p.weapon];
+  if (wDef && wDef.infiniteAmmo) {
+    ammoCur.textContent = "∞";
+    ammoMag.textContent = "∞";
+    ammoEl.classList.remove("empty", "reloading");
+  } else {
+    ammoCur.textContent = p.ammo;
+    ammoEl.classList.toggle("empty", p.ammo === 0);
+    ammoEl.classList.toggle("reloading", p.reloading);
+  }
   if (wDef) {
-    ammoMag.textContent = wDef.mag;
+    if (!wDef.infiniteAmmo) ammoMag.textContent = wDef.mag;
     weaponNameEl.textContent = wDef.name.toUpperCase();
   }
 
@@ -551,7 +616,11 @@ setInterval(() => {
   const canShoot = shooting && (!wDef || !wDef.semiAuto || !prevFiring);
   if (canShoot && !myReloading && performance.now() - lastShotAt >= fireMs) {
     lastShotAt = performance.now();
-    if (myAmmo > 0) {
+    const isKnife = !!(wDef && wDef.infiniteAmmo);
+    if (isKnife) {
+      recoil = 1;
+      SFX.swing();
+    } else if (myAmmo > 0) {
       spawnTracer();
       recoil = 1;
       SFX.shoot(((wDef && wDef.name) || "rifle").toLowerCase());
@@ -604,6 +673,11 @@ engine.runRenderLoop(() => {
   const activeGun = gunRoots[myWeapon];
   activeGun.position.set(base.x, base.y - dip, base.z - recoil * 0.12 * kick);
   activeGun.rotation.set(-recoil * 0.5 * kick + dip * 1.2, 0, 0);
+
+  // Slowly spin each available pickup's floating weapon icon so it reads as "grab me".
+  for (const pv of pickupVisuals) {
+    if (pv.icon.isEnabled()) pv.icon.rotation.y += 0.02;
+  }
 
   scene.render();
   updateNametags();
