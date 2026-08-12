@@ -1,0 +1,27 @@
+services:
+  blockblitz:
+    build: .
+    image: blockblitz
+    container_name: blockblitz
+    restart: unless-stopped
+    ports:
+      - "8080:8080"          # host:container — drop this if only the tunnel needs to reach it
+    environment:
+      - ASPNETCORE_URLS=http://0.0.0.0:8080
+      - MaxPlayers=16
+    # The server exposes GET /health for external checks.
+
+  # --- Optional: publish over your Cloudflare named tunnel from this compose ---
+  # Uncomment and set TUNNEL_TOKEN. In the Cloudflare dashboard, add a public
+  # hostname route for this tunnel pointing at the ORIGIN  http://blockblitz:8080
+  # (same Docker network → service name resolves). WebSocket passthrough is on by default.
+  #
+  # cloudflared:
+  #   image: cloudflare/cloudflared:latest
+  #   container_name: blockblitz-tunnel
+  #   restart: unless-stopped
+  #   command: tunnel --no-autoupdate run
+  #   environment:
+  #     - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+  #   depends_on:
+  #     - blockblitz

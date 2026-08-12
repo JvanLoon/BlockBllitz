@@ -60,12 +60,17 @@ bolt-on later instead of a rewrite.
       impact; adds protocol fragility. Revisit only if bandwidth becomes a real constraint.)
 - [ ] Snapshot/delta compression (only send what changed)     (DEFERRED: same rationale.)
 
-## Phase 5 — Ship (Cloudflare tunnel)
-- [ ] Dockerize server; server serves the built client static files
-- [ ] Config via env: ports, tick rate, max players
-- [ ] Cloudflare tunnel: ensure WebSocket upgrade passes; origin `http://web:PORT`
-- [ ] Basic rate limiting / input validation / sanity checks (anti-cheat baseline)
-- [ ] Test end-to-end over the tunnel from an external network
+## Phase 5 — Ship (Cloudflare tunnel)  ✅ DONE (except live external test)
+- [x] Dockerize server; server serves the client (multi-stage .NET 10; CLIENT_PATH).
+      Verified: image builds, container serves index.html/game.js, /health=ok, WS connects, 60Hz loop.
+- [x] Config via env: ASPNETCORE_URLS (port), MaxPlayers, CLIENT_PATH.
+      (Tick/broadcast rate left as compile-time consts — sim fundamentals, not deploy knobs.)
+- [x] Cloudflare tunnel wiring: client auto-picks wss:// over HTTPS; docker-compose service
+      `blockblitz:8080` as the origin; optional cloudflared service stubbed; documented in README.
+- [x] Hardening baseline: authoritative server + input validation (NaN/Inf, pitch clamp),
+      input-queue & message-size caps, MaxPlayers connection limit.
+- [ ] Test end-to-end over the tunnel from an external network  (USER ACTION: needs your CF
+      dashboard route + an off-LAN device — see README "Deploy behind a Cloudflare tunnel")
 
 ---
 

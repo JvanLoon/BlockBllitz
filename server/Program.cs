@@ -9,11 +9,16 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<GameServer>());
 
 var app = builder.Build();
 
-// Serve the Babylon.js client (../client) as static files, index.html by default.
-var clientPath = Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", "client"));
+// Serve the Babylon.js client as static files (index.html by default). The path is
+// CLIENT_PATH when set (Docker), otherwise ../client relative to the app for local dev.
+var clientPath = builder.Configuration["CLIENT_PATH"]
+    ?? Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", "client"));
 var files = new PhysicalFileProvider(clientPath);
 app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = files });
 app.UseStaticFiles(new StaticFileOptions { FileProvider = files });
+
+// Lightweight health probe for the tunnel / container orchestrator.
+app.MapGet("/health", () => Results.Ok("ok"));
 
 app.UseWebSockets();
 

@@ -47,17 +47,35 @@ public sealed class GameServer : BackgroundService
         PropertyNameCaseInsensitive = true,
     };
 
+    // Hardening limits.
+    private const int InputQueueCap = 256;   // drop inputs past this to bound memory from a flood
+    private const int MaxMessageBytes = 8192; // reject oversized WebSocket messages
+
     private readonly ConcurrentDictionary<string, Player> _players = new();
     private readonly ILogger<GameServer> _log;
+    private readonly int _maxPlayers;
     private uint _tick;
 
-    public GameServer(ILogger<GameServer> log) => _log = log;
+    public GameServer(ILogger<GameServer> log, IConfiguration cfg)
+    {
+        _log = log;
+        _maxPlayers = Math.Max(1, cfg.GetValue("MaxPlayers", 16));
+    }
 
     // ---- Connection lifecycle -------------------------------------------------
 
     /// <summary>Handles one WebSocket connection for its whole lifetime.</summary>
     public async Task HandleClient(WebSocket socket, CancellationToken ct)
     {
+        if (_players.Count >= _maxPlayers)
+        {
+            _log.LogInformation("Rejected connection: server full ({Count}/{Max})", _players.Count, _maxPlayers);
+            try { await SendJson(socket, new { type = "full" }, ct); } catch { /* best effort */ }
+            try { await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation, "server full", CancellationToken.None); }
+            catch { /* best effort */ }
+            return;
+        }
+
         var player = new Player
         {
             Id = Guid.NewGuid().ToString("N")[..8],
@@ -130,7 +148,8 @@ public sealed class GameServer : BackgroundService
                 else
                 {
                     var input = JsonSerializer.Deserialize<InputMessage>(text, Json);
-                    if (input is not null) player.Inputs.Enqueue(input);
+                    if (input is not null && player.Inputs.Count < InputQueueCap)
+                        player.Inputs.Enqueue(Sanitize(input));
                 }
             }
             catch (JsonException) { /* ignore malformed message */ }
@@ -146,6 +165,18 @@ public sealed class GameServer : BackgroundService
         foreach (var c in t)
             if (!char.IsControl(c)) sb.Append(c);
         return sb.ToString();
+    }
+
+    /// <summary>Guards against malformed/hostile input: no NaN/Inf, pitch clamped, sane render tick.</summary>
+    private static InputMessage Sanitize(InputMessage m)
+    {
+        static float Finite(float v) => float.IsFinite(v) ? v : 0f;
+        return m with
+        {
+            Yaw = Finite(m.Yaw),
+            Pitch = Math.Clamp(Finite(m.Pitch), -1.55f, 1.55f),
+            RenderTick = float.IsFinite(m.RenderTick) && m.RenderTick > 0f ? m.RenderTick : 0f,
+        };
     }
 
     /// <summary>Reads one full text message, reassembling fragments if needed.</summary>
@@ -165,6 +196,7 @@ public sealed class GameServer : BackgroundService
             result = await socket.ReceiveAsync(buffer, ct);
             if (result.MessageType == WebSocketMessageType.Close) return null;
             ms.Write(buffer, 0, result.Count);
+            if (ms.Length > MaxMessageBytes) return null; // oversized; drop the connection's message
         }
         return result.MessageType == WebSocketMessageType.Text
             ? Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length)
