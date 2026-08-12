@@ -6,13 +6,16 @@ using System.Text.Json;
 namespace BlockBlitz.Server;
 
 /// <summary>
-/// The authoritative game server. Holds all connected players, runs a fixed-timestep
-/// simulation on a background loop, and broadcasts world snapshots to every client.
+/// One independent match: an authoritative simulation with its own players and tick loop.
+/// The server can run many of these concurrently (see <see cref="LobbyManager"/>) — a
+/// lobby is created on demand and torn down once empty. Holds all connected players, runs
+/// a fixed-timestep simulation on a background loop, and broadcasts world snapshots to
+/// every client in it.
 ///
 /// Design rule (so latency-hiding can be bolted on later without a rewrite):
 /// clients send inputs only; this loop is the single source of truth for positions.
 /// </summary>
-public sealed class GameServer : BackgroundService
+public sealed class Lobby
 {
     public const int TickRate = 60;   // simulation steps per second
     // Interim smoothing measure: broadcast every tick (60Hz) to cut the strafe judder on
@@ -53,14 +56,20 @@ public sealed class GameServer : BackgroundService
     private const int MaxMessageBytes = 8192; // reject oversized WebSocket messages
 
     private readonly ConcurrentDictionary<string, Player> _players = new();
-    private readonly ILogger<GameServer> _log;
-    private readonly int _maxPlayers;
+    private readonly ILogger _log;
     private uint _tick;
 
-    public GameServer(ILogger<GameServer> log, IConfiguration cfg)
+    public string Code { get; }
+    public string Name { get; }
+    public int MaxPlayers { get; }
+    public int PlayerCount => _players.Count;
+
+    public Lobby(string code, string name, int maxPlayers, ILogger log)
     {
+        Code = code;
+        Name = name;
+        MaxPlayers = maxPlayers;
         _log = log;
-        _maxPlayers = Math.Max(1, cfg.GetValue("MaxPlayers", 16));
     }
 
     // ---- Connection lifecycle -------------------------------------------------
@@ -68,9 +77,9 @@ public sealed class GameServer : BackgroundService
     /// <summary>Handles one WebSocket connection for its whole lifetime.</summary>
     public async Task HandleClient(WebSocket socket, CancellationToken ct)
     {
-        if (_players.Count >= _maxPlayers)
+        if (_players.Count >= MaxPlayers)
         {
-            _log.LogInformation("Rejected connection: server full ({Count}/{Max})", _players.Count, _maxPlayers);
+            _log.LogInformation("Rejected connection: lobby {Code} full ({Count}/{Max})", Code, _players.Count, MaxPlayers);
             try { await SendJson(socket, new { type = "full" }, ct); } catch { /* best effort */ }
             try { await socket.CloseAsync(WebSocketCloseStatus.PolicyViolation, "server full", CancellationToken.None); }
             catch { /* best effort */ }
@@ -92,6 +101,8 @@ public sealed class GameServer : BackgroundService
         {
             type = "welcome",
             id = player.Id,
+            lobbyCode = Code,
+            lobbyName = Name,
             tickRate = TickRate,
             sendRate = SendRate,
             arenaHalf = ArenaHalf,
@@ -114,7 +125,7 @@ public sealed class GameServer : BackgroundService
         }, ct);
 
         _players[player.Id] = player;
-        _log.LogInformation("Player {Id} connected ({Count} online)", player.Id, _players.Count);
+        _log.LogInformation("Player {Id} joined lobby {Code} ({Count} online)", player.Id, Code, _players.Count);
 
         try
         {
@@ -125,7 +136,7 @@ public sealed class GameServer : BackgroundService
         finally
         {
             _players.TryRemove(player.Id, out _);
-            _log.LogInformation("Player {Id} disconnected ({Count} online)", player.Id, _players.Count);
+            _log.LogInformation("Player {Id} left lobby {Code} ({Count} online)", player.Id, Code, _players.Count);
             if (socket.State == WebSocketState.Open)
             {
                 try { await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None); }
@@ -216,27 +227,34 @@ public sealed class GameServer : BackgroundService
 
     // ---- Simulation -----------------------------------------------------------
 
-    protected override async Task ExecuteAsync(CancellationToken ct)
+    /// <summary>The tick loop for this one lobby. Runs until <paramref name="ct"/> is cancelled
+    /// (the lobby manager cancels it once the lobby has been empty for a while).</summary>
+    public async Task RunAsync(CancellationToken ct)
     {
         var period = TimeSpan.FromSeconds(1.0 / TickRate);
         using var timer = new PeriodicTimer(period);
         const float dt = 1f / TickRate;
         int ticksPerSend = TickRate / SendRate;
 
-        _log.LogInformation("Game loop started at {TickRate}Hz (broadcast {SendRate}Hz)", TickRate, SendRate);
+        _log.LogInformation("Lobby {Code} '{Name}' started at {TickRate}Hz (broadcast {SendRate}Hz, max {Max})",
+            Code, Name, TickRate, SendRate, MaxPlayers);
 
-        while (await timer.WaitForNextTickAsync(ct))
+        try
         {
-            _tick++;
-            var hitShooters = Step(dt);
+            while (await timer.WaitForNextTickAsync(ct))
+            {
+                _tick++;
+                var hitShooters = Step(dt);
 
-            // Tell each shooter their shot connected, so the client can show a hitmarker.
-            foreach (var shooter in hitShooters)
-                await SendJson(shooter.Socket, new { type = "hit" }, ct);
+                // Tell each shooter their shot connected, so the client can show a hitmarker.
+                foreach (var shooter in hitShooters)
+                    await SendJson(shooter.Socket, new { type = "hit" }, ct);
 
-            if (_tick % ticksPerSend == 0)
-                await Broadcast(ct);
+                if (_tick % ticksPerSend == 0)
+                    await Broadcast(ct);
+            }
         }
+        catch (OperationCanceledException) { /* lobby closed */ }
     }
 
     /// <summary>Advances the world one step. Returns the players whose shots connected this tick.</summary>

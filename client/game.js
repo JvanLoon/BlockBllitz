@@ -264,13 +264,15 @@ window.addEventListener("keydown", (e) => { keys[e.code] = true; });
 window.addEventListener("keyup", (e) => { keys[e.code] = false; });
 
 const overlay = document.getElementById("overlay");
+const overlayLobbyInfo = document.getElementById("overlayLobbyInfo");
+const leaveLobbyLink = document.getElementById("leaveLobbyLink");
+const lobbyBadge = document.getElementById("lobbyBadge");
 const crosshair = document.getElementById("crosshair");
 const hitmarker = document.getElementById("hitmarker");
 const healthEl = document.getElementById("health");
 const hpSpan = healthEl.querySelector(".hp");
 const damageEl = document.getElementById("damage");
 const deathEl = document.getElementById("death");
-const nameInput = document.getElementById("nameInput");
 const ammoEl = document.getElementById("ammo");
 const ammoCur = ammoEl.querySelector(".cur");
 const ammoMag = ammoEl.querySelector(".mag");
@@ -309,26 +311,18 @@ const INTERP_DELAY = 100;      // ms: render other players this far in the past
 const snapshots = [];          // {t, tick, players} buffer for interpolation
 let currentRenderTick = 0;     // fractional server tick we're showing others at (for lag comp)
 
-// Restore last-used name.
-nameInput.value = localStorage.getItem("blockblitz-name") || "";
-nameInput.focus();
-
+// Name + lobby selection happen before this file's WebSocket ever connects (see connect()
+// below, called by lobby.js once a lobby is joined) — by the time the overlay matters,
+// we're always already in a lobby, so it only needs to gate pointer lock.
 function startPlaying() {
   SFX.unlock(); // must run from this user-gesture handler or the browser blocks audio
-  const name = nameInput.value.trim();
-  if (name) localStorage.setItem("blockblitz-name", name);
-  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "join", name }));
   canvas.requestPointerLock();
 }
 
-// Clicking the overlay anywhere except the name field (incl. the PLAY button) starts/resumes.
+// Clicking the overlay anywhere except "Leave lobby" starts/resumes play.
 overlay.addEventListener("click", (e) => {
-  if (e.target === nameInput) return; // let them focus/type
+  if (e.target === leaveLobbyLink) return;
   startPlaying();
-});
-nameInput.addEventListener("keydown", (e) => {
-  e.stopPropagation();               // don't leak typing into movement keys
-  if (e.key === "Enter") startPlaying();
 });
 
 document.addEventListener("pointerlockchange", () => {
@@ -338,7 +332,7 @@ document.addEventListener("pointerlockchange", () => {
   healthEl.classList.toggle("hidden", !pointerLocked);
   ammoEl.classList.toggle("hidden", !pointerLocked);
   weaponNameEl.classList.toggle("hidden", !pointerLocked);
-  if (!pointerLocked) { firing = false; nameInput.focus(); }
+  if (!pointerLocked) firing = false;
 });
 
 // ---- Scoreboard (hold Tab) ------------------------------------------------
@@ -423,41 +417,73 @@ function simulateMove(x, z, inp) {
 }
 
 // ---- Networking -----------------------------------------------------------
+//
+// The game WebSocket is NOT opened on script load — lobby.js owns name entry and the
+// server browser first, then calls connect(code, name) once a lobby has been chosen.
 
 let myId = null;
 let tickRate = 60, sendRate = 30;
 let connected = false;
+let ws = null;
 
-const wsProto = location.protocol === "https:" ? "wss" : "ws";
-const ws = new WebSocket(`${wsProto}://${location.host}/ws`);
+/** Called by lobby.js once a lobby is joined. Opens the game connection for it. */
+function connect(code, name) {
+  const wsProto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${wsProto}://${location.host}/ws?code=${encodeURIComponent(code)}`);
 
-ws.addEventListener("open", () => { connected = true; });
-ws.addEventListener("close", () => { connected = false; });
-ws.addEventListener("message", (ev) => {
-  let msg;
-  try { msg = JSON.parse(ev.data); } catch { return; }
-  if (msg.type === "welcome") {
-    myId = msg.id;
-    tickRate = msg.tickRate;
-    sendRate = msg.sendRate;
-    weaponDefs = msg.weapons || [];
-    if (weaponDefs[myWeapon]) {
-      ammoMag.textContent = weaponDefs[myWeapon].mag;
-      weaponNameEl.textContent = weaponDefs[myWeapon].name.toUpperCase();
+  ws.addEventListener("open", () => { connected = true; });
+  ws.addEventListener("close", () => { connected = false; });
+  ws.addEventListener("message", (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    if (msg.type === "welcome") {
+      myId = msg.id;
+      tickRate = msg.tickRate;
+      sendRate = msg.sendRate;
+      weaponDefs = msg.weapons || [];
+      if (weaponDefs[myWeapon]) {
+        ammoMag.textContent = weaponDefs[myWeapon].mag;
+        weaponNameEl.textContent = weaponDefs[myWeapon].name.toUpperCase();
+      }
+      if (msg.moveSpeed) MOVE_SPEED = msg.moveSpeed;
+      if (msg.playerRadius) PLAYER_RADIUS = msg.playerRadius;
+      if (msg.arenaHalf) ARENA_HALF = msg.arenaHalf;
+      const obs = msg.obstacles || [];
+      clientObstacles = obs.map((o) => ({ x: o.x, z: o.z, hx: o.hx, hz: o.hz }));
+      buildObstacles(obs);
+      buildPickups(msg.weaponPickups || []);
+
+      // Now that we're actually in a match, reveal the play prompt + shareable lobby badge.
+      const lobbyLabel = `${msg.lobbyName || "Lobby"} · ${msg.lobbyCode || code}`;
+      overlayLobbyInfo.textContent = lobbyLabel;
+      lobbyBadge.innerHTML = `${msg.lobbyName || "Lobby"} · <b>${msg.lobbyCode || code}</b>`;
+      lobbyBadge.classList.remove("hidden");
+      overlay.classList.remove("hidden");
+
+      ws.send(JSON.stringify({ type: "join", name }));
+    } else if (msg.type === "state") {
+      applyState(msg);
+    } else if (msg.type === "hit") {
+      showHitmarker();
+    } else if (msg.type === "error" || msg.type === "full") {
+      window.BlockBlitzLobby?.onJoinError(msg.type === "full" ? "full" : (msg.reason || "error"));
     }
-    if (msg.moveSpeed) MOVE_SPEED = msg.moveSpeed;
-    if (msg.playerRadius) PLAYER_RADIUS = msg.playerRadius;
-    if (msg.arenaHalf) ARENA_HALF = msg.arenaHalf;
-    const obs = msg.obstacles || [];
-    clientObstacles = obs.map((o) => ({ x: o.x, z: o.z, hx: o.hx, hz: o.hz }));
-    buildObstacles(obs);
-    buildPickups(msg.weaponPickups || []);
-  } else if (msg.type === "state") {
-    applyState(msg);
-  } else if (msg.type === "hit") {
-    showHitmarker();
-  }
+  });
+}
+
+/** Disconnects and goes back to the server browser. A full reload is the simplest way to
+ * reset every piece of match state (meshes, prediction, HUD) cleanly. */
+function leaveLobby() {
+  if (ws) { try { ws.close(); } catch { /* already closing */ } }
+  location.reload();
+}
+
+leaveLobbyLink.addEventListener("click", (e) => {
+  e.stopPropagation();
+  leaveLobby();
 });
+
+window.BlockBlitzGame = { connect };
 
 let hitmarkerTimer = 0;
 function showHitmarker() {
@@ -583,7 +609,7 @@ function updateSelf(p) {
 // One input tick: build the input, predict our own movement locally, buffer it for
 // reconciliation, and send it. Runs at the server tick rate so prediction stays in step.
 setInterval(() => {
-  if (ws.readyState !== WebSocket.OPEN) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
   const active = pointerLocked && myAlive;             // only move while locked & alive
   const shooting = firing && pointerLocked && myAlive;
 

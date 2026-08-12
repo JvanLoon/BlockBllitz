@@ -1,11 +1,14 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using BlockBlitz.Server;
 using Microsoft.Extensions.FileProviders;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Single GameServer instance, also run as the background game-loop hosted service.
-builder.Services.AddSingleton<GameServer>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<GameServer>());
+// One LobbyManager for the process: it owns every live Lobby (each with its own players
+// and tick loop) and sweeps away ones that have sat empty for a while.
+builder.Services.AddSingleton<LobbyManager>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<LobbyManager>());
 
 var app = builder.Build();
 
@@ -20,6 +23,27 @@ app.UseStaticFiles(new StaticFileOptions { FileProvider = files });
 // Lightweight health probe for the tunnel / container orchestrator.
 app.MapGet("/health", () => Results.Ok("ok"));
 
+var jsonOpts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+
+// ---- Server browser: list/create lobbies over plain HTTP ------------------------
+
+app.MapGet("/api/lobbies", (LobbyManager manager) => Results.Json(manager.ListLobbies(), jsonOpts));
+
+app.MapPost("/api/lobbies", async (HttpRequest req, LobbyManager manager) =>
+{
+    CreateLobbyRequest? body;
+    try { body = await req.ReadFromJsonAsync<CreateLobbyRequest>(jsonOpts); }
+    catch (JsonException) { return Results.BadRequest(); }
+    if (body is null) return Results.BadRequest();
+
+    var lobby = manager.CreateLobby(body.Name, body.MaxPlayers);
+    if (lobby is null) return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+
+    return Results.Json(new { code = lobby.Code, name = lobby.Name, maxPlayers = lobby.MaxPlayers }, jsonOpts);
+});
+
+// ---- Game connection: one WebSocket per player, routed to their lobby by ?code= ---
+
 app.UseWebSockets();
 
 app.Map("/ws", async context =>
@@ -30,9 +54,26 @@ app.Map("/ws", async context =>
         return;
     }
 
+    var code = context.Request.Query["code"].ToString();
+    var manager = context.RequestServices.GetRequiredService<LobbyManager>();
+
     using var socket = await context.WebSockets.AcceptWebSocketAsync();
-    var server = context.RequestServices.GetRequiredService<GameServer>();
-    await server.HandleClient(socket, context.RequestAborted);
+
+    if (string.IsNullOrWhiteSpace(code) || !manager.TryGetLobby(code, out var lobby))
+    {
+        try
+        {
+            var bytes = JsonSerializer.SerializeToUtf8Bytes(new { type = "error", reason = "lobby_not_found" }, jsonOpts);
+            await socket.SendAsync(bytes, System.Net.WebSockets.WebSocketMessageType.Text, true, context.RequestAborted);
+            await socket.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure, "no such lobby", CancellationToken.None);
+        }
+        catch { /* best effort */ }
+        return;
+    }
+
+    await lobby.HandleClient(socket, context.RequestAborted);
 });
 
 app.Run();
+
+record CreateLobbyRequest([property: JsonPropertyName("name")] string? Name, [property: JsonPropertyName("maxPlayers")] int MaxPlayers);

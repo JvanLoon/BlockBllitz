@@ -92,5 +92,13 @@ bolt-on later instead of a rewrite.
       GameServer.cs`); ownership persists across respawns; the server rejects switching to
       an unowned weapon. Keys are now 1-5 (knife first).
 - [ ] Game modes (TDM, FFA, rounds)
-- [ ] Simple lobby / room codes for private matches
+- [x] Simple lobby / room codes for private matches — on load: pick a name, then a server
+      browser (`client/lobby.js`). Create a lobby (name + max players up to 16) with a
+      Create button; it appears in everyone's browser list (polled `GET /api/lobbies`) and
+      gets a short shareable join code (e.g. `K2FZZ`) others can type in directly. The
+      server moved from one global match to `LobbyManager` running many independent
+      `Lobby` instances concurrently (own players + 60Hz tick loop each), created via
+      `POST /api/lobbies` and addressed by code over `/ws?code=`. Empty lobbies are swept
+      after a 30s grace period. "Leave lobby" does a full page reload back to the browser
+      (simplest full state reset); name is remembered via localStorage.
 - [ ] Spectator mode

@@ -4,12 +4,16 @@ A fast, competitive **3D multiplayer arena shooter**.
 
 - **Client:** Babylon.js (WebGL), served as static files. First-person, WASD + mouse-look,
   hitscan shooting, cover, name tags, scoreboard.
-- **Server:** ASP.NET Core (.NET 10), authoritative WebSocket game server. 60 Hz simulation,
-  60 Hz broadcast. Clients send *inputs only*.
+- **Server:** ASP.NET Core (.NET 10). `LobbyManager` runs many independent authoritative
+  matches (`Lobby`) concurrently — each with its own players and 60 Hz tick loop — created
+  on demand via the server browser and addressed by a short join code. Clients send
+  *inputs only*.
 - **Netcode:** client-side prediction + reconciliation, entity interpolation (~100 ms), and
   hitscan lag compensation. See [`todo.md`](todo.md) for the full roadmap and what's deferred.
 
-Controls: **WASD** move · **mouse** look · **click** shoot · **R** reload · **Tab** scoreboard · **Esc** release.
+On load: pick a name, then the server browser — create a lobby (name + max players) or join
+one from the list / by its code. Controls once in a match: **WASD** move · **mouse** look ·
+**click** attack · **1-5** weapon · **R** reload · **Tab** scoreboard · **Esc** release.
 
 ---
 
@@ -38,11 +42,11 @@ Then browse to <http://localhost:8080>. Stop with `docker compose down`.
 | Variable          | Default              | Meaning                                             |
 |-------------------|----------------------|-----------------------------------------------------|
 | `ASPNETCORE_URLS` | `http://0.0.0.0:8080`| Listen address/port.                                |
-| `MaxPlayers`      | `16`                 | Reject new connections past this (sends `full`).    |
+| `MaxPlayers`      | `16`                 | Per-lobby player cap ceiling — a creator's requested lobby size is clamped to this (sends `full` past it). |
 | `CLIENT_PATH`     | `/client` (Docker)   | Where the static client lives. Dev falls back to `../client`. |
 
 Tick rate (60 Hz) and broadcast rate (60 Hz) are compile-time constants in
-[`server/GameServer.cs`](server/GameServer.cs).
+[`server/Lobby.cs`](server/Lobby.cs).
 
 ## Deploy behind a Cloudflare tunnel
 

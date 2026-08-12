@@ -24,15 +24,25 @@
       font: 13px/1.5 ui-monospace, Consolas, monospace; pointer-events: none;
       text-shadow: 0 1px 2px #000;
     }
-    #overlay {
+    /* Full-screen panels: name entry, server browser, and the in-game play/pause prompt. */
+    .screen {
       position: fixed; inset: 0; display: flex; flex-direction: column;
       align-items: center; justify-content: center;
-      background: rgba(6,6,14,0.75); color: #e8f0ff; cursor: pointer;
-      font: 600 20px/1.5 system-ui, sans-serif; text-align: center; z-index: 10;
+      background: rgba(6,6,14,0.9); color: #e8f0ff;
+      font: 600 20px/1.5 system-ui, sans-serif; text-align: center; z-index: 20;
     }
-    #overlay small { display: block; margin-top: 10px; font-weight: 400; color: #9fb4d6; font-size: 14px; }
+    #overlay { z-index: 10; cursor: pointer; background: rgba(6,6,14,0.75); }
+    .screen small { display: block; margin-top: 10px; font-weight: 400; color: #9fb4d6; font-size: 14px; }
     .hidden { display: none !important; }
     #title { position: fixed; left: 12px; top: 10px; color: #7fd7ff; font: 700 18px system-ui, sans-serif; letter-spacing: 1px; text-shadow: 0 1px 2px #000; }
+
+    /* Current lobby badge, top-right, so the code stays shareable mid-match. */
+    #lobbyBadge {
+      position: fixed; right: 14px; top: 10px; color: #9fb4d6;
+      font: 600 12px ui-monospace, Consolas, monospace; letter-spacing: 1px;
+      text-shadow: 0 1px 2px #000; pointer-events: none;
+    }
+    #lobbyBadge b { color: #7fd7ff; }
 
     /* Hitmarker: four short red ticks flashed around the crosshair on a confirmed hit. */
     #hitmarker {
@@ -69,23 +79,54 @@
     }
     #death small { margin-top: 12px; font: 500 16px system-ui, sans-serif; color: #ffb3b3; letter-spacing: 0; }
 
-    /* Start panel (name + play) */
-    #overlay .panel {
+    /* Shared card used by every full-screen panel (name entry, browser, play prompt). */
+    .panel {
       display: flex; flex-direction: column; align-items: center; gap: 12px;
       background: rgba(12,14,24,0.92); padding: 26px 34px; border: 1px solid #21304a; border-radius: 14px;
+      cursor: default; /* overrides #overlay's pointer cursor inside the card */
     }
-    #overlay label { font: 600 12px system-ui, sans-serif; letter-spacing: 2px; color: #7f9bc4; }
-    #overlay input {
-      width: 220px; padding: 10px 12px; font: 600 18px system-ui, sans-serif; text-align: center;
+    .panel.wide { width: min(560px, 90vw); }
+    .panel label { font: 600 12px system-ui, sans-serif; letter-spacing: 2px; color: #7f9bc4; }
+    .panel input {
+      padding: 10px 12px; font: 600 18px system-ui, sans-serif; text-align: center;
       color: #eaf2ff; background: #0b1020; border: 1px solid #2b3d5c; border-radius: 8px; outline: none;
     }
-    #overlay input:focus { border-color: #4f8fff; }
-    #overlay #playBtn {
-      margin-top: 2px; padding: 10px 44px; font: 800 18px system-ui, sans-serif; letter-spacing: 2px;
+    .panel input:focus { border-color: #4f8fff; }
+    #playerNameInput, #joinCodeInput { width: 220px; }
+    .panel button.primary {
+      padding: 10px 44px; font: 800 18px system-ui, sans-serif; letter-spacing: 2px;
       color: #04121f; background: #5fd0ff; border: none; border-radius: 8px; cursor: pointer;
     }
-    #overlay #playBtn:hover { background: #8adcff; }
-    #overlay small { font: 500 13px system-ui, sans-serif; color: #8ea3c4; letter-spacing: 0; }
+    .panel button.primary:hover { background: #8adcff; }
+    .panel small { font: 500 13px system-ui, sans-serif; color: #8ea3c4; letter-spacing: 0; }
+    #overlayLobbyInfo { font: 600 14px system-ui, sans-serif; color: #7fd7ff; letter-spacing: 1px; }
+    #leaveLobbyLink {
+      margin-top: 4px; font: 500 13px system-ui, sans-serif; color: #7f9bc4; text-decoration: underline;
+      cursor: pointer;
+    }
+    #leaveLobbyLink:hover { color: #b7cbe8; }
+
+    /* Server browser */
+    #browserTitle { font: 700 16px system-ui, sans-serif; letter-spacing: 2px; color: #7fd7ff; }
+    .browserRow { display: flex; gap: 8px; width: 100%; align-items: center; }
+    .browserRow input[type="text"], .browserRow input[type="number"] { flex: 1; min-width: 0; }
+    .browserRow input[type="number"] { flex: 0 0 70px; }
+    .browserRow button { flex: 0 0 auto; }
+    #createBtn, #joinCodeBtn {
+      padding: 10px 18px; font: 800 14px system-ui, sans-serif; letter-spacing: 1px;
+      color: #04121f; background: #5fd0ff; border: none; border-radius: 8px; cursor: pointer;
+    }
+    #createBtn:hover, #joinCodeBtn:hover { background: #8adcff; }
+    .browserDivider { width: 100%; height: 1px; background: #21304a; margin: 2px 0; }
+    #lobbyListWrap { width: 100%; max-height: 220px; overflow-y: auto; }
+    #lobbyList { width: 100%; border-collapse: collapse; font: 14px system-ui, sans-serif; }
+    #lobbyList th, #lobbyList td { padding: 7px 8px; text-align: left; color: #dbe7ff; }
+    #lobbyList th { color: #7f9bc4; font-weight: 600; font-size: 12px; border-bottom: 1px solid #263650; }
+    #lobbyList td.code { font: 12px ui-monospace, Consolas, monospace; color: #ffd36b; letter-spacing: 1px; }
+    #lobbyList tbody tr { cursor: pointer; }
+    #lobbyList tbody tr:hover td { background: rgba(95,208,255,0.08); }
+    #lobbyListEmpty { padding: 14px 0; color: #7f9bc4; font: 13px system-ui, sans-serif; }
+    #joinError { color: #ff8a8a; font: 500 13px system-ui, sans-serif; min-height: 16px; }
 
     /* Weapon name, above ammo, bottom-right */
     #weaponName {
@@ -129,6 +170,7 @@
 <body>
   <canvas id="renderCanvas"></canvas>
   <div id="title">BLOCKBLITZ</div>
+  <div id="lobbyBadge" class="hidden"></div>
   <div id="damage"></div>
   <div id="crosshair" class="hidden"></div>
   <div id="hitmarker"></div>
@@ -143,13 +185,55 @@
     </table>
   </div>
   <div id="death" class="hidden">ELIMINATED<small>respawning…</small></div>
-  <div id="overlay">
+
+  <!-- In-game play/pause prompt: shown once connected to a lobby, whenever pointer lock is off. -->
+  <div id="overlay" class="screen hidden">
     <div class="panel">
-      <label for="nameInput">YOUR NAME</label>
-      <input id="nameInput" maxlength="16" autocomplete="off" spellcheck="false" placeholder="Blitzer" />
-      <button id="playBtn">PLAY</button>
+      <div id="overlayLobbyInfo"></div>
+      <button id="playBtn" class="primary">PLAY</button>
       <small>WASD move · mouse look · click attack · 1-5 weapon · R reload · Tab scores · Esc release</small>
       <small>Starts with a knife — pick up guns from the glowing pads on the map</small>
+      <a id="leaveLobbyLink">Leave lobby</a>
+    </div>
+  </div>
+
+  <!-- Step 1: pick a display name (once — remembered after that). -->
+  <div id="nameScreen" class="screen">
+    <div class="panel">
+      <label for="playerNameInput">YOUR NAME</label>
+      <input id="playerNameInput" maxlength="16" autocomplete="off" spellcheck="false" placeholder="Blitzer" />
+      <button id="nameContinueBtn" class="primary">CONTINUE</button>
+    </div>
+  </div>
+
+  <!-- Step 2: server browser — create a lobby, join one from the list, or join by code. -->
+  <div id="browserScreen" class="screen hidden">
+    <div class="panel wide">
+      <div id="browserTitle">SERVER BROWSER</div>
+
+      <div class="browserRow">
+        <input id="createNameInput" type="text" placeholder="Lobby name" maxlength="24" autocomplete="off" />
+        <input id="createMaxInput" type="number" min="2" max="16" value="8" title="Max players" />
+        <button id="createBtn">CREATE</button>
+      </div>
+
+      <div class="browserDivider"></div>
+
+      <div id="lobbyListWrap">
+        <table id="lobbyList">
+          <thead><tr><th>Lobby</th><th>Players</th><th>Code</th></tr></thead>
+          <tbody id="lobbyListBody"></tbody>
+        </table>
+        <div id="lobbyListEmpty">No lobbies yet — create one above.</div>
+      </div>
+
+      <div class="browserDivider"></div>
+
+      <div class="browserRow">
+        <input id="joinCodeInput" type="text" placeholder="HAVE A CODE?" maxlength="5" autocomplete="off" />
+        <button id="joinCodeBtn">JOIN</button>
+      </div>
+      <div id="joinError"></div>
     </div>
   </div>
 
@@ -158,5 +242,6 @@
   <script src="https://cdn.babylonjs.com/materialsLibrary/babylonjs.materials.min.js"></script>
   <script src="audio.js"></script>
   <script src="game.js"></script>
+  <script src="lobby.js"></script>
 </body>
 </html>
