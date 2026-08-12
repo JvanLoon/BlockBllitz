@@ -33,11 +33,21 @@ public sealed class Player
     // Combat state (owned by the tick loop).
     public float Health = 100f;
     public bool Alive = true;
-    public int Ammo = 30;
     public bool Reloading;
     public uint ReloadDoneTick;  // tick a reload completes
     public uint NextShotTick;    // earliest tick this player may fire again
     public uint RespawnTick;     // tick at which a dead player respawns
+
+    // Loadout: all four weapons carried at once, each with its own magazine.
+    public int WeaponIndex;
+    public readonly int[] Ammo = new int[Weapons.All.Length];
+    public bool FireHeldPrev;    // for semi-auto edge detection
+
+    public int CurrentAmmo
+    {
+        get => Ammo[WeaponIndex];
+        set => Ammo[WeaponIndex] = value;
+    }
 
     /// <summary>Inputs queued by the receive loop, drained by the tick loop.</summary>
     public readonly ConcurrentQueue<InputMessage> Inputs = new();

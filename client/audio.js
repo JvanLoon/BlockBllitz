@@ -117,6 +117,12 @@ const SFX = (() => {
     tone({ t, freq: 340, type: "square", duration: 0.04, gain: 0.2 });
   }
 
+  function switchWeapon() {
+    const t = now();
+    noiseBurst({ t, duration: 0.03, filterType: "highpass", freq: 2000, q: 1, gain: 0.25 });
+    tone({ t: t + 0.02, freq: 500, type: "square", duration: 0.02, gain: 0.15 });
+  }
+
   function hitmarker() {
     const t = now();
     tone({ t, freq: 2000, type: "square", duration: 0.035, gain: 0.25 });
@@ -150,5 +156,5 @@ const SFX = (() => {
     footstep();
   }
 
-  return { unlock, shoot, dryFire, reloadStart, reloadEnd, hitmarker, damage, death, footstepThrottled };
+  return { unlock, shoot, dryFire, reloadStart, reloadEnd, switchWeapon, hitmarker, damage, death, footstepThrottled };
 })();

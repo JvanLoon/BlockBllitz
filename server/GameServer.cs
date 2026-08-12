@@ -23,16 +23,10 @@ public sealed class GameServer : BackgroundService
     private const float MoveSpeed = 6f;    // world units per second
     private const float ArenaHalf = 19f;   // arena is 40x40, keep players just inside
 
-    // Combat tuning.
+    // Combat tuning. Per-weapon damage/fire-rate/mag/reload live in Weapons.All.
     private const float MaxHealth = 100f;
-    private const float ShotDamage = 25f;      // 4 shots to down a full-health player
-    private const float ShotRange = 100f;      // hitscan reach (covers the whole arena)
     private const float EyeHeight = 1.6f;      // must match the client camera height
-    private const int FireIntervalTicks = 7;   // ~0.12s between shots at 60Hz
     private static readonly int RespawnDelayTicks = TickRate * 2; // 2s
-
-    private const int MagSize = 30;
-    private static readonly int ReloadTicks = (int)(TickRate * 1.6f); // 1.6s reload
 
     private const float PlayerRadius = 0.4f;   // used for obstacle collision
 
@@ -93,13 +87,20 @@ public sealed class GameServer : BackgroundService
             id = player.Id,
             tickRate = TickRate,
             sendRate = SendRate,
-            magSize = MagSize,
             arenaHalf = ArenaHalf,
             moveSpeed = MoveSpeed,
             playerRadius = PlayerRadius,
             obstacles = Arena.Obstacles.Select(o => new
             {
                 x = o.X, z = o.Z, hx = o.HalfX, hz = o.HalfZ, h = o.Height,
+            }).ToArray(),
+            weapons = Weapons.All.Select(w => new
+            {
+                name = w.Name,
+                mag = w.MagSize,
+                fireMs = w.FireIntervalTicks * 1000 / TickRate,
+                reloadMs = w.ReloadTicks * 1000 / TickRate,
+                semiAuto = w.SemiAuto,
             }).ToArray(),
         }, ct);
 
@@ -176,6 +177,7 @@ public sealed class GameServer : BackgroundService
             Yaw = Finite(m.Yaw),
             Pitch = Math.Clamp(Finite(m.Pitch), -1.55f, 1.55f),
             RenderTick = float.IsFinite(m.RenderTick) && m.RenderTick > 0f ? m.RenderTick : 0f,
+            Weapon = Weapons.Clamp(m.Weapon),
         };
     }
 
@@ -258,37 +260,40 @@ public sealed class GameServer : BackgroundService
 
             var inp = p.Latest;
 
+            // Weapon switch: cancel any reload in progress and impose a short equip delay
+            // before the new weapon can fire, so flicking between weapons isn't a free action.
+            if (applied > 0 && inp.Weapon != p.WeaponIndex)
+            {
+                p.WeaponIndex = inp.Weapon;
+                p.Reloading = false;
+                p.NextShotTick = _tick + (uint)Weapons.EquipTicks;
+            }
+            var w = Weapons.All[p.WeaponIndex];
+
             // Reloading: finish an in-progress reload, or start one when requested (or
             // automatically when trying to fire on empty) and the mag isn't full.
             if (p.Reloading)
             {
-                if (_tick >= p.ReloadDoneTick) { p.Ammo = MagSize; p.Reloading = false; }
+                if (_tick >= p.ReloadDoneTick) { p.CurrentAmmo = w.MagSize; p.Reloading = false; }
             }
-            else if (applied > 0 && (inp.Reload || (inp.Fire && p.Ammo == 0)) && p.Ammo < MagSize)
+            else if (applied > 0 && (inp.Reload || (inp.Fire && p.CurrentAmmo == 0)) && p.CurrentAmmo < w.MagSize)
             {
                 p.Reloading = true;
-                p.ReloadDoneTick = _tick + (uint)ReloadTicks;
+                p.ReloadDoneTick = _tick + (uint)w.ReloadTicks;
             }
 
             // Firing: server owns the fire-rate cooldown and ammo so clients can't cheat either.
-            if (applied > 0 && inp.Fire && !p.Reloading && p.Ammo > 0 && _tick >= p.NextShotTick)
+            // Semi-auto weapons additionally require a fresh press (no holding down for auto-fire).
+            bool wantsFire = applied > 0 && inp.Fire && !p.Reloading && p.CurrentAmmo > 0 && _tick >= p.NextShotTick;
+            if (w.SemiAuto && p.FireHeldPrev) wantsFire = false;
+            if (wantsFire)
             {
-                p.NextShotTick = _tick + (uint)FireIntervalTicks;
-                p.Ammo--;
-                if (TryHitscan(p, inp.RenderTick, out var target))
-                {
-                    target.Health -= ShotDamage;
+                p.NextShotTick = _tick + (uint)w.FireIntervalTicks;
+                p.CurrentAmmo--;
+                if (FireWeapon(p, w, inp.RenderTick))
                     hitShooters.Add(p);
-                    if (target.Health <= 0f)
-                    {
-                        target.Alive = false;
-                        target.RespawnTick = _tick + (uint)RespawnDelayTicks;
-                        p.Kills++;
-                        target.Deaths++;
-                        _log.LogInformation("{Killer} killed {Victim}", p.Name, target.Name);
-                    }
-                }
             }
+            if (applied > 0) p.FireHeldPrev = inp.Fire;
 
             RecordHistory(p);
         }
@@ -351,7 +356,9 @@ public sealed class GameServer : BackgroundService
         var (sx, sz) = PickSpawn(p);
         p.X = sx; p.Z = sz;
         p.Health = MaxHealth;
-        p.Ammo = MagSize;
+        // Full ammo in every weapon's mag; WeaponIndex is intentionally preserved across
+        // respawns so a player keeps whatever they had equipped.
+        for (int i = 0; i < Weapons.All.Length; i++) p.Ammo[i] = Weapons.All[i].MagSize;
         p.Reloading = false;
         p.Alive = true;
     }
@@ -377,22 +384,66 @@ public sealed class GameServer : BackgroundService
     }
 
     /// <summary>
-    /// Casts a ray from the shooter's eye along their view direction and returns the nearest
-    /// alive player it hits within range. No lag compensation yet (Phase 4) — uses live positions.
+    /// Fires one weapon discharge: casts <see cref="WeaponDef.Pellets"/> hitscan rays (1 for
+    /// normal guns, several for the shotgun's spread cone), applies damage per target hit
+    /// (a target can take multiple pellets in one shot), and handles kills. Returns true if
+    /// at least one pellet connected, so the caller can show the shooter a hitmarker.
     /// </summary>
-    private bool TryHitscan(Player shooter, float renderTick, out Player hit)
+    private bool FireWeapon(Player shooter, in WeaponDef w, float renderTick)
+    {
+        Dictionary<Player, float>? hits = null;
+        float spreadRad = w.SpreadDeg * MathF.PI / 180f;
+
+        for (int i = 0; i < w.Pellets; i++)
+        {
+            float yaw = shooter.Yaw, pitch = shooter.Pitch;
+            if (spreadRad > 0f)
+            {
+                yaw += ((float)Random.Shared.NextDouble() - 0.5f) * spreadRad;
+                pitch += ((float)Random.Shared.NextDouble() - 0.5f) * spreadRad;
+            }
+            if (TryHitscan(shooter, renderTick, w.Range, yaw, pitch, out var target))
+            {
+                hits ??= new Dictionary<Player, float>();
+                hits.TryGetValue(target, out var cur);
+                hits[target] = cur + w.Damage;
+            }
+        }
+        if (hits is null) return false;
+
+        foreach (var (target, dmg) in hits)
+        {
+            target.Health -= dmg;
+            if (target.Health <= 0f && target.Alive)
+            {
+                target.Alive = false;
+                target.RespawnTick = _tick + (uint)RespawnDelayTicks;
+                shooter.Kills++;
+                target.Deaths++;
+                _log.LogInformation("{Killer} killed {Victim}", shooter.Name, target.Name);
+            }
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Casts a ray from the shooter's eye along the given aim direction (which may be
+    /// perturbed from the shooter's actual yaw/pitch for weapon spread) and returns the
+    /// nearest alive player it hits within range.
+    /// </summary>
+    private bool TryHitscan(Player shooter, float renderTick, float range, float yaw, float pitch, out Player hit)
     {
         hit = null!;
 
         // View direction from yaw/pitch (matches the client camera's Euler order).
-        float cp = MathF.Cos(shooter.Pitch), sp = MathF.Sin(shooter.Pitch);
-        float sy = MathF.Sin(shooter.Yaw), cy = MathF.Cos(shooter.Yaw);
+        float cp = MathF.Cos(pitch), sp = MathF.Sin(pitch);
+        float sy = MathF.Sin(yaw), cy = MathF.Cos(yaw);
         float dx = cp * sy, dy = -sp, dz = cp * cy;
 
         float ox = shooter.X, oy = EyeHeight, oz = shooter.Z;
 
         // A shot can't pass through cover: the nearest wall along the ray caps the reach.
-        float best = ShotRange;
+        float best = range;
         foreach (var o in Arena.Obstacles)
         {
             if (RayAabb(ox, oy, oz, dx, dy, dz,
@@ -481,7 +532,7 @@ public sealed class GameServer : BackgroundService
                 x = p.X, y = p.Y, z = p.Z,
                 yaw = p.Yaw, pitch = p.Pitch,
                 hp = p.Health, alive = p.Alive,
-                ammo = p.Ammo, reloading = p.Reloading,
+                ammo = p.CurrentAmmo, reloading = p.Reloading, weapon = p.WeaponIndex,
                 kills = p.Kills, deaths = p.Deaths,
                 seq = p.AckSeq,   // reconciliation ack for the owning client
             }).ToArray(),

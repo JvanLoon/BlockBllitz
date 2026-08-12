@@ -75,9 +75,11 @@ bolt-on later instead of a rewrite.
 ---
 
 ## Someday / nice-to-have
-- [ ] Sound effects (Web Audio)
-- [ ] Simple player/weapon models + animations (glTF)
-- [ ] Multiple weapons
+- [x] Sound effects (Web Audio) — procedural synthesis (no asset files): shoot/reload/
+      dry-fire/hitmarker/damage/death/footstep/switch, see `client/audio.js`
+- [x] Multiple weapons — Pistol/SMG/Rifle/Shotgun, server-authoritative (`server/Weapons.cs`),
+      switch with 1-4, shotgun does multi-pellet spread, pistol is semi-auto (edge-triggered)
+- [ ] Simple player/weapon models (currently primitive boxes; see in-progress work)
 - [ ] Game modes (TDM, FFA, rounds)
 - [ ] Simple lobby / room codes for private matches
 - [ ] Spectator mode

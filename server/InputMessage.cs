@@ -15,6 +15,9 @@ public sealed record InputMessage
     public float Yaw { get; init; }
     public float Pitch { get; init; }
 
+    /// <summary>Requested weapon slot (0-3). The server clamps and validates this.</summary>
+    public int Weapon { get; init; }
+
     /// <summary>Client-assigned, monotonically increasing. Echoed back as the ack for reconciliation.</summary>
     public uint Seq { get; init; }
 

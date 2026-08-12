@@ -87,6 +87,12 @@
     #overlay #playBtn:hover { background: #8adcff; }
     #overlay small { font: 500 13px system-ui, sans-serif; color: #8ea3c4; letter-spacing: 0; }
 
+    /* Weapon name, above ammo, bottom-right */
+    #weaponName {
+      position: fixed; right: 18px; bottom: 46px; font: 700 13px system-ui, sans-serif;
+      letter-spacing: 2px; color: #7fd7ff; text-shadow: 0 1px 2px #000; pointer-events: none;
+    }
+
     /* Ammo, bottom-right */
     #ammo {
       position: fixed; right: 18px; bottom: 14px; font: 800 26px ui-monospace, Consolas, monospace;
@@ -127,6 +133,7 @@
   <div id="crosshair" class="hidden"></div>
   <div id="hitmarker"></div>
   <div id="health" class="hidden">HP <span class="hp">100</span></div>
+  <div id="weaponName" class="hidden">PISTOL</div>
   <div id="ammo" class="hidden"><span class="clip"><span class="cur">30</span>/<span class="mag">30</span></span><span class="reloading">RELOADING…</span></div>
   <div id="hud"></div>
   <div id="scoreboard" class="hidden">
@@ -141,7 +148,7 @@
       <label for="nameInput">YOUR NAME</label>
       <input id="nameInput" maxlength="16" autocomplete="off" spellcheck="false" placeholder="Blitzer" />
       <button id="playBtn">PLAY</button>
-      <small>WASD move · mouse look · click shoot · R reload · Tab scores · Esc release</small>
+      <small>WASD move · mouse look · click shoot · 1-4 weapon · R reload · Tab scores · Esc release</small>
     </div>
   </div>
 

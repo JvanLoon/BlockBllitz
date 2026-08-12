@@ -127,19 +127,22 @@ const nameInput = document.getElementById("nameInput");
 const ammoEl = document.getElementById("ammo");
 const ammoCur = ammoEl.querySelector(".cur");
 const ammoMag = ammoEl.querySelector(".mag");
+const weaponNameEl = document.getElementById("weaponName");
 const scoreboard = document.getElementById("scoreboard");
 const scoreboardBody = scoreboard.querySelector("tbody");
 
 let pointerLocked = false;
 let firing = false;      // left mouse held
+let prevFiring = false;  // firing state as of the last input tick (for semi-auto edge detection)
 let myHp = 100;
 let myAlive = true;
 let myReloading = false;
 let myAmmo = 30;
-let magSize = 30;
+let myWeapon = 0;        // selected weapon slot, 0-3
+let weaponDefs = [];     // [{name, mag, fireMs, reloadMs, semiAuto}] from welcome
 let latestPlayers = [];  // last state snapshot, for the scoreboard
 let lastShotAt = 0;      // cosmetic tracer cadence (ms)
-const FIRE_MS = 120;     // matches the server's fire interval
+const FIRE_MS = 120;     // fallback cadence before weaponDefs arrives
 
 // ---- Prediction / interpolation state -------------------------------------
 
@@ -186,6 +189,7 @@ document.addEventListener("pointerlockchange", () => {
   crosshair.classList.toggle("hidden", !pointerLocked);
   healthEl.classList.toggle("hidden", !pointerLocked);
   ammoEl.classList.toggle("hidden", !pointerLocked);
+  weaponNameEl.classList.toggle("hidden", !pointerLocked);
   if (!pointerLocked) { firing = false; nameInput.focus(); }
 });
 
@@ -227,6 +231,17 @@ document.addEventListener("mousemove", (e) => {
   pitch += e.movementY * LOOK_SENS;
   const limit = Math.PI / 2 - 0.05;
   pitch = Math.max(-limit, Math.min(limit, pitch));
+});
+
+// ---- Weapon switching (1-4) ------------------------------------------------
+
+const WEAPON_KEYS = { Digit1: 0, Digit2: 1, Digit3: 2, Digit4: 3 };
+window.addEventListener("keydown", (e) => {
+  if (!pointerLocked || !myAlive) return;
+  const idx = WEAPON_KEYS[e.code];
+  if (idx === undefined || idx === myWeapon || !weaponDefs[idx]) return;
+  myWeapon = idx;
+  SFX.switchWeapon();
 });
 
 // ---- Shared movement simulation (must match the server exactly) -----------
@@ -276,8 +291,11 @@ ws.addEventListener("message", (ev) => {
     myId = msg.id;
     tickRate = msg.tickRate;
     sendRate = msg.sendRate;
-    magSize = msg.magSize || magSize;
-    ammoMag.textContent = magSize;
+    weaponDefs = msg.weapons || [];
+    if (weaponDefs[myWeapon]) {
+      ammoMag.textContent = weaponDefs[myWeapon].mag;
+      weaponNameEl.textContent = weaponDefs[myWeapon].name.toUpperCase();
+    }
     if (msg.moveSpeed) MOVE_SPEED = msg.moveSpeed;
     if (msg.playerRadius) PLAYER_RADIUS = msg.playerRadius;
     if (msg.arenaHalf) ARENA_HALF = msg.arenaHalf;
@@ -373,6 +391,14 @@ function updateSelf(p) {
   ammoEl.classList.toggle("empty", p.ammo === 0);
   ammoEl.classList.toggle("reloading", p.reloading);
 
+  // Weapon HUD reflects the server's authoritative slot (it applies switches immediately,
+  // so this only lags our own keypress by one round trip).
+  const wDef = weaponDefs[p.weapon];
+  if (wDef) {
+    ammoMag.textContent = wDef.mag;
+    weaponNameEl.textContent = wDef.name.toUpperCase();
+  }
+
   deathEl.classList.toggle("hidden", p.alive);
   crosshair.classList.toggle("hidden", !p.alive || !pointerLocked);
 }
@@ -395,6 +421,7 @@ setInterval(() => {
     pitch,
     seq: ++inputSeq,
     renderTick: currentRenderTick,
+    weapon: myWeapon,
   };
 
   // Predict immediately for instant, smooth local movement.
@@ -404,17 +431,23 @@ setInterval(() => {
   ws.send(JSON.stringify({ type: "input", ...input }));
 
   // Cosmetic only: spawn a tracer + recoil at roughly the server fire rate (the server is
-  // authoritative for actual hits). Predicting the cadence locally keeps the feedback instant.
-  if (shooting && !myReloading && performance.now() - lastShotAt >= FIRE_MS) {
+  // authoritative for actual hits/ammo). Predicting the cadence locally keeps the feedback
+  // instant. Semi-auto weapons only "fire" on the rising edge of the mouse button, matching
+  // the server's one-shot-per-click behavior instead of a hold-to-spam timer.
+  const wDef = weaponDefs[myWeapon];
+  const fireMs = (wDef && wDef.fireMs) || FIRE_MS;
+  const canShoot = shooting && (!wDef || !wDef.semiAuto || !prevFiring);
+  if (canShoot && !myReloading && performance.now() - lastShotAt >= fireMs) {
     lastShotAt = performance.now();
     if (myAmmo > 0) {
       spawnTracer();
       recoil = 1;
-      SFX.shoot("rifle");
+      SFX.shoot(((wDef && wDef.name) || "rifle").toLowerCase());
     } else {
       SFX.dryFire();
     }
   }
+  prevFiring = shooting;
 
   // Footsteps while actually moving, locked in, and alive.
   if (active && (input.fwd || input.back || input.left || input.right)) {
