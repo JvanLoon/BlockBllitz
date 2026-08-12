@@ -13,8 +13,9 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<LobbyManager>());
 var app = builder.Build();
 
 // Always-on public lobby: created once at startup, exempt from the empty-lobby sweep, so
-// there's always somewhere to play without needing to create a lobby first.
-app.Services.GetRequiredService<LobbyManager>().CreateManagedLobby("PUBLIC", "Public Arena");
+// there's always somewhere to play without needing to create a lobby first. Always the
+// original map.
+app.Services.GetRequiredService<LobbyManager>().CreateManagedLobby("PUBLIC", "Public Arena", Maps.ClassicId);
 
 // Serve the Babylon.js client as static files (index.html by default). The path is
 // CLIENT_PATH when set (Docker), otherwise ../client relative to the app for local dev.
@@ -29,9 +30,11 @@ app.MapGet("/health", () => Results.Ok("ok"));
 
 var jsonOpts = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
-// ---- Server browser: list/create lobbies over plain HTTP ------------------------
+// ---- Server browser: list/create lobbies, list maps, all over plain HTTP --------
 
 app.MapGet("/api/lobbies", (LobbyManager manager) => Results.Json(manager.ListLobbies(), jsonOpts));
+
+app.MapGet("/api/maps", () => Results.Json(Maps.All.Select(m => new { id = m.Id, name = m.Name }), jsonOpts));
 
 app.MapPost("/api/lobbies", async (HttpRequest req, LobbyManager manager) =>
 {
@@ -40,10 +43,10 @@ app.MapPost("/api/lobbies", async (HttpRequest req, LobbyManager manager) =>
     catch (JsonException) { return Results.BadRequest(); }
     if (body is null) return Results.BadRequest();
 
-    var lobby = manager.CreateLobby(body.Name, body.MaxPlayers);
+    var lobby = manager.CreateLobby(body.Name, body.MaxPlayers, body.MapId);
     if (lobby is null) return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
 
-    return Results.Json(new { code = lobby.Code, name = lobby.Name, maxPlayers = lobby.MaxPlayers }, jsonOpts);
+    return Results.Json(new { code = lobby.Code, name = lobby.Name, maxPlayers = lobby.MaxPlayers, mapId = lobby.MapId }, jsonOpts);
 });
 
 // ---- Game connection: one WebSocket per player, routed to their lobby by ?code= ---
@@ -80,4 +83,7 @@ app.Map("/ws", async context =>
 
 app.Run();
 
-record CreateLobbyRequest([property: JsonPropertyName("name")] string? Name, [property: JsonPropertyName("maxPlayers")] int MaxPlayers);
+record CreateLobbyRequest(
+    [property: JsonPropertyName("name")] string? Name,
+    [property: JsonPropertyName("maxPlayers")] int MaxPlayers,
+    [property: JsonPropertyName("mapId")] string? MapId);

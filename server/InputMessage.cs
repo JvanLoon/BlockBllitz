@@ -12,10 +12,12 @@ public sealed record InputMessage
     public bool Right { get; init; }
     public bool Fire { get; init; }
     public bool Reload { get; init; }
+    public bool Sprint { get; init; }
+    public bool Jump { get; init; }
     public float Yaw { get; init; }
     public float Pitch { get; init; }
 
-    /// <summary>Requested weapon slot (0-3). The server clamps and validates this.</summary>
+    /// <summary>Requested weapon slot (0-4). The server clamps and validates this.</summary>
     public int Weapon { get; init; }
 
     /// <summary>Client-assigned, monotonically increasing. Echoed back as the ack for reconciliation.</summary>

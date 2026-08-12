@@ -7,9 +7,10 @@
 // page reload, which naturally returns to that same untouched (black) pre-game state.
 
 function startGame(code, name) {
-  // ---- Constants ------------------------------------------------------------
+  // ---- Constants (defaults; overwritten by the server's welcome message) ----
 
-  const EYE_HEIGHT = 1.6; // camera height above the floor (units)
+  let EYE_HEIGHT = 1.6;     // camera height above the player's feet
+  let PLAYER_HEIGHT = 1.6;  // third-person model / hitbox height
 
   // ---- Babylon setup --------------------------------------------------------
 
@@ -31,29 +32,39 @@ function startGame(code, name) {
   const sun = new BABYLON.DirectionalLight("sun", new BABYLON.Vector3(-0.5, -1, -0.4), scene);
   sun.intensity = 0.55;
 
-  // Ground with a grid so movement is easy to read.
-  const ground = BABYLON.MeshBuilder.CreateGround("ground", { width: 40, height: 40 }, scene);
-  const grid = new BABYLON.GridMaterial("grid", scene);
-  grid.majorUnitFrequency = 5;
-  grid.minorUnitVisibility = 0.35;
-  grid.gridRatio = 1;
-  grid.mainColor = new BABYLON.Color3(0.09, 0.11, 0.18);
-  grid.lineColor = new BABYLON.Color3(0.25, 0.45, 0.7);
-  grid.opacity = 0.99;
-  ground.material = grid;
+  // ---- Ground + corner pillars (sized to the map's arenaHalf once known) ----
 
-  // Corner pillars for orientation.
-  const pillarColors = [
-    [0.9, 0.3, 0.3], [0.3, 0.9, 0.4], [0.3, 0.5, 0.95], [0.95, 0.85, 0.3],
-  ];
-  [[-18, -18], [18, -18], [-18, 18], [18, 18]].forEach((c, i) => {
-    const p = BABYLON.MeshBuilder.CreateBox("pillar" + i, { width: 1.5, depth: 1.5, height: 6 }, scene);
-    p.position.set(c[0], 3, c[1]);
-    const m = new BABYLON.StandardMaterial("pm" + i, scene);
-    m.diffuseColor = new BABYLON.Color3(...pillarColors[i]);
-    m.emissiveColor = new BABYLON.Color3(pillarColors[i][0] * 0.25, pillarColors[i][1] * 0.25, pillarColors[i][2] * 0.25);
-    p.material = m;
-  });
+  let groundMesh = null;
+  function buildGround(half) {
+    if (groundMesh) groundMesh.dispose();
+    const size = half * 2;
+    groundMesh = BABYLON.MeshBuilder.CreateGround("ground", { width: size, height: size }, scene);
+    const grid = new BABYLON.GridMaterial("grid", scene);
+    grid.majorUnitFrequency = 5;
+    grid.minorUnitVisibility = 0.35;
+    grid.gridRatio = 1;
+    grid.mainColor = new BABYLON.Color3(0.09, 0.11, 0.18);
+    grid.lineColor = new BABYLON.Color3(0.25, 0.45, 0.7);
+    grid.opacity = 0.99;
+    groundMesh.material = grid;
+  }
+
+  const pillarMeshes = [];
+  function buildPillars(half) {
+    for (const p of pillarMeshes) p.dispose();
+    pillarMeshes.length = 0;
+    const inset = half - 1;
+    const pillarColors = [[0.9, 0.3, 0.3], [0.3, 0.9, 0.4], [0.3, 0.5, 0.95], [0.95, 0.85, 0.3]];
+    [[-inset, -inset], [inset, -inset], [-inset, inset], [inset, inset]].forEach((c, i) => {
+      const p = BABYLON.MeshBuilder.CreateBox("pillar" + i, { width: 1.5, depth: 1.5, height: 6 }, scene);
+      p.position.set(c[0], 3, c[1]);
+      const m = new BABYLON.StandardMaterial("pm" + i, scene);
+      m.diffuseColor = new BABYLON.Color3(...pillarColors[i]);
+      m.emissiveColor = new BABYLON.Color3(pillarColors[i][0] * 0.25, pillarColors[i][1] * 0.25, pillarColors[i][2] * 0.25);
+      p.material = m;
+      pillarMeshes.push(p);
+    });
+  }
 
   // ---- Weapon models ----------------------------------------------------------
   //
@@ -176,10 +187,15 @@ function startGame(code, name) {
     const mat = new BABYLON.StandardMaterial("coverMat", scene);
     mat.diffuseColor = new BABYLON.Color3(0.22, 0.25, 0.32);
     mat.emissiveColor = new BABYLON.Color3(0.05, 0.06, 0.08);
+    // Climbable obstacles (e.g. the house) get a warm tint — a visual cue that you can jump
+    // up onto them, distinct from plain solid cover.
+    const climbMat = new BABYLON.StandardMaterial("climbMat", scene);
+    climbMat.diffuseColor = new BABYLON.Color3(0.55, 0.4, 0.22);
+    climbMat.emissiveColor = new BABYLON.Color3(0.14, 0.1, 0.05);
     for (const o of list) {
       const box = BABYLON.MeshBuilder.CreateBox("cover", { width: o.hx * 2, depth: o.hz * 2, height: o.h }, scene);
       box.position.set(o.x, o.h / 2, o.z);
-      box.material = mat;
+      box.material = o.climbable ? climbMat : mat;
       box.isPickable = false;
       obstacleMeshes.push(box);
     }
@@ -223,9 +239,9 @@ function startGame(code, name) {
   /** @type {Map<string, HTMLElement>} id -> floating name tag */
   const tags = new Map();
 
-  // Simple humanoid silhouette (torso + head + arms), sized to stay within the server's
-  // hitbox envelope (0.8 x 1.0 x 0.8, see BoxHalfXZ/BoxTop in Lobby.cs) so what you see
-  // lines up with what you hit.
+  // Simple humanoid silhouette (torso + head + arms), proportioned from PLAYER_HEIGHT so it
+  // stays exactly as tall as the server's hitbox (and — per design — the eye/viewmodel
+  // height), with the root at the player's feet (matches the server's Y convention).
   function makePlayerBox(id) {
     const root = new BABYLON.TransformNode("p_" + id, scene);
 
@@ -240,20 +256,22 @@ function startGame(code, name) {
     faceMat.diffuseColor = BABYLON.Color3.White();
     faceMat.emissiveColor = col.scale(0.7);
 
-    // Note: the server reports each player's Y as a fixed 0.5 (the hitbox's vertical center,
-    // see Player.Y in Player.cs), so these local offsets are relative to that center, not
-    // to the ground — e.g. local y=-0.1 puts the torso's world center at 0.4.
-    wbox(root, "torso_" + id, 0.6, 0.8, 0.5, 0, -0.1, 0, mat);
-    wbox(root, "head_" + id, 0.4, 0.2, 0.4, 0, 0.4, 0, mat);
+    const headH = PLAYER_HEIGHT * 0.22;
+    const torsoH = PLAYER_HEIGHT - headH;
+    const torsoY = torsoH / 2;
+    const headY = torsoH + headH / 2;
+
+    wbox(root, "torso_" + id, 0.6, torsoH, 0.5, 0, torsoY, 0, mat);
+    wbox(root, "head_" + id, 0.4, headH, 0.4, 0, headY, 0, mat);
     // Bright marker on the front of the head so facing direction reads at a glance.
-    wbox(root, "visor_" + id, 0.24, 0.1, 0.04, 0, 0.4, 0.21, faceMat);
-    wbox(root, "armL_" + id, 0.15, 0.55, 0.18, -0.38, -0.1, 0, mat);
-    wbox(root, "armR_" + id, 0.15, 0.55, 0.18, 0.38, -0.1, 0, mat);
+    wbox(root, "visor_" + id, 0.24, headH * 0.35, 0.04, 0, headY, 0.21, faceMat);
+    wbox(root, "armL_" + id, 0.15, torsoH * 0.8, 0.18, -0.38, torsoY, 0, mat);
+    wbox(root, "armR_" + id, 0.15, torsoH * 0.8, 0.18, 0.38, torsoY, 0, mat);
 
     // Held weapon: rebuilt in applyState() whenever this player's reported weapon changes.
     const heldGunRoot = new BABYLON.TransformNode("held_" + id, scene);
     heldGunRoot.parent = root;
-    heldGunRoot.position.set(0.3, 0.05, 0.32);
+    heldGunRoot.position.set(0.32, torsoH * 0.65, 0.32);
     root.heldWeapon = -1;
     root.heldGunRoot = heldGunRoot;
 
@@ -305,11 +323,17 @@ function startGame(code, name) {
 
   const DT = 1 / 60;             // must match the server tick step
   let MOVE_SPEED = 6;            // from welcome (server authority)
+  let SPRINT_MULT = 1.6;         // from welcome
+  let GRAVITY = 24;              // from welcome
+  let JUMP_SPEED = 10;           // from welcome
   let PLAYER_RADIUS = 0.4;       // from welcome
   let ARENA_HALF = 19;           // from welcome
-  let clientObstacles = [];      // [{x, z, hx, hz}] for local collision (mirrors the server)
+  let clientObstacles = [];      // [{x, z, hx, hz, h, climbable}] for local collision (mirrors the server)
 
-  let predX = 0, predZ = 0;      // our locally-predicted position
+  const ROOF_EPSILON = 0.05;     // must match the server's Lobby.RoofEpsilon
+  const LANDING_MARGIN = 0.6;    // must match the server's Lobby.LandingMargin
+
+  let predX = 0, predZ = 0, predY = 0, predVelY = 0; // our locally-predicted position
   let predInit = false;
   let inputSeq = 0;
   const pendingInputs = [];      // {seq, input} not yet acknowledged by the server
@@ -392,32 +416,92 @@ function startGame(code, name) {
   });
 
   // ---- Shared movement simulation (must match the server exactly) -----------
+  //
+  // Mirrors Lobby.cs's UpdateVertical + MovePlayer + BlockedAt + SurfaceHeightAt: gravity and
+  // jump first (using this tick's surface height), then horizontal movement using the
+  // freshly-updated Y so climbable obstacles (the house) block like a wall below their roof
+  // and are open above it.
 
-  function blockedAt(x, z) {
+  function blockedAt(x, z, y) {
     for (const o of clientObstacles) {
-      if (Math.abs(x - o.x) < o.hx + PLAYER_RADIUS && Math.abs(z - o.z) < o.hz + PLAYER_RADIUS)
+      if (Math.abs(x - o.x) < o.hx + PLAYER_RADIUS && Math.abs(z - o.z) < o.hz + PLAYER_RADIUS) {
+        if (o.climbable && y >= o.h - ROOF_EPSILON) continue;
         return true;
+      }
     }
     return false;
   }
 
-  function simulateMove(x, z, inp) {
+  function surfaceHeightAt(x, z) {
+    let surface = 0;
+    const pad = PLAYER_RADIUS + LANDING_MARGIN;
+    for (const o of clientObstacles) {
+      if (!o.climbable) continue;
+      if (Math.abs(x - o.x) < o.hx + pad && Math.abs(z - o.z) < o.hz + pad) surface = Math.max(surface, o.h);
+    }
+    return surface;
+  }
+
+  /** state: {x, z, y, velY}. Returns the next state after one input tick. */
+  function simulateMovement(state, inp) {
+    let { x, z, y, velY } = state;
+
+    const surface = surfaceHeightAt(x, z);
+    velY -= GRAVITY * DT;
+    y += velY * DT;
+    let grounded;
+    if (y <= surface) { y = surface; velY = 0; grounded = true; }
+    else grounded = false;
+    if (inp.jump && grounded) { velY = JUMP_SPEED; grounded = false; }
+
     const mx = (inp.right ? 1 : 0) - (inp.left ? 1 : 0);
     const mz = (inp.fwd ? 1 : 0) - (inp.back ? 1 : 0);
-    if (mx === 0 && mz === 0) return { x, z };
+    if (mx !== 0 || mz !== 0) {
+      const sin = Math.sin(inp.yaw), cos = Math.cos(inp.yaw);
+      let dx = sin * mz + cos * mx;
+      let dz = cos * mz - sin * mx;
+      const len = Math.hypot(dx, dz);
+      dx /= len; dz /= len;
 
-    const sin = Math.sin(inp.yaw), cos = Math.cos(inp.yaw);
-    let dx = sin * mz + cos * mx;
-    let dz = cos * mz - sin * mx;
-    const len = Math.hypot(dx, dz);
-    dx /= len; dz /= len;
+      const speed = inp.sprint ? MOVE_SPEED * SPRINT_MULT : MOVE_SPEED;
+      const clamp = (v) => Math.max(-ARENA_HALF, Math.min(ARENA_HALF, v));
+      const nx = clamp(x + dx * speed * DT);
+      if (!blockedAt(nx, z, y)) x = nx;
+      const nz = clamp(z + dz * speed * DT);
+      if (!blockedAt(x, nz, y)) z = nz;
+    }
 
-    const clamp = (v) => Math.max(-ARENA_HALF, Math.min(ARENA_HALF, v));
-    const nx = clamp(x + dx * MOVE_SPEED * DT);
-    if (!blockedAt(nx, z)) x = nx;
-    const nz = clamp(z + dz * MOVE_SPEED * DT);
-    if (!blockedAt(x, nz)) z = nz;
-    return { x, z };
+    return { x, z, y, velY };
+  }
+
+  // ---- Line-of-sight (for name tags — don't show through walls) -------------
+
+  function segmentHitsBox2D(x0, z0, x1, z1, o) {
+    const dx = x1 - x0, dz = z1 - z0;
+    let tmin = 0, tmax = 1;
+    if (Math.abs(dx) < 1e-8) {
+      if (x0 < o.x - o.hx || x0 > o.x + o.hx) return false;
+    } else {
+      let t1 = (o.x - o.hx - x0) / dx, t2 = (o.x + o.hx - x0) / dx;
+      if (t1 > t2) [t1, t2] = [t2, t1];
+      tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2);
+      if (tmin > tmax) return false;
+    }
+    if (Math.abs(dz) < 1e-8) {
+      if (z0 < o.z - o.hz || z0 > o.z + o.hz) return false;
+    } else {
+      let t1 = (o.z - o.hz - z0) / dz, t2 = (o.z + o.hz - z0) / dz;
+      if (t1 > t2) [t1, t2] = [t2, t1];
+      tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2);
+      if (tmin > tmax) return false;
+    }
+    return true;
+  }
+
+  /** 2D (XZ) check — good enough approximation of "is there a wall between these two points". */
+  function lineOfSightBlocked(x0, z0, x1, z1) {
+    for (const o of clientObstacles) if (segmentHitsBox2D(x0, z0, x1, z1, o)) return true;
+    return false;
   }
 
   // ---- Networking -------------------------------------------------------------
@@ -444,15 +528,24 @@ function startGame(code, name) {
         weaponNameEl.textContent = weaponDefs[myWeapon].name.toUpperCase();
       }
       if (msg.moveSpeed) MOVE_SPEED = msg.moveSpeed;
+      if (msg.sprintMult) SPRINT_MULT = msg.sprintMult;
+      if (msg.gravity) GRAVITY = msg.gravity;
+      if (msg.jumpSpeed) JUMP_SPEED = msg.jumpSpeed;
       if (msg.playerRadius) PLAYER_RADIUS = msg.playerRadius;
+      if (msg.eyeHeight) EYE_HEIGHT = msg.eyeHeight;
+      if (msg.playerHeight) PLAYER_HEIGHT = msg.playerHeight;
       if (msg.arenaHalf) ARENA_HALF = msg.arenaHalf;
+
+      buildGround(ARENA_HALF);
+      buildPillars(ARENA_HALF);
+
       const obs = msg.obstacles || [];
-      clientObstacles = obs.map((o) => ({ x: o.x, z: o.z, hx: o.hx, hz: o.hz }));
+      clientObstacles = obs.map((o) => ({ x: o.x, z: o.z, hx: o.hx, hz: o.hz, h: o.h, climbable: !!o.climbable }));
       buildObstacles(obs);
       buildPickups(msg.weaponPickups || []);
 
       // Now that we're actually in a match, reveal the play prompt + shareable lobby badge.
-      const lobbyLabel = `${msg.lobbyName || "Lobby"} · ${msg.lobbyCode || code}`;
+      const lobbyLabel = `${msg.lobbyName || "Lobby"} · ${msg.lobbyCode || code}${msg.mapName ? " · " + msg.mapName : ""}`;
       overlayLobbyInfo.textContent = lobbyLabel;
       lobbyBadge.innerHTML = `${msg.lobbyName || "Lobby"} · <b>${msg.lobbyCode || code}</b>`;
       lobbyBadge.classList.remove("hidden");
@@ -545,11 +638,11 @@ function startGame(code, name) {
   // Reconciliation: snap to the authoritative position, then re-apply inputs the server hasn't
   // acknowledged yet. On LAN the correction is ~0, so this is invisible; over WAN it self-corrects.
   function reconcile(me) {
-    if (!predInit) { predX = me.x; predZ = me.z; predInit = true; }
+    if (!predInit) { predX = me.x; predZ = me.z; predY = me.y; predVelY = me.vy || 0; predInit = true; }
     while (pendingInputs.length && pendingInputs[0].seq <= me.seq) pendingInputs.shift();
-    let x = me.x, z = me.z;
-    for (const pi of pendingInputs) ({ x, z } = simulateMove(x, z, pi.input));
-    predX = x; predZ = z;
+    let state = { x: me.x, z: me.z, y: me.y, velY: me.vy || 0 };
+    for (const pi of pendingInputs) state = simulateMovement(state, pi.input);
+    predX = state.x; predZ = state.z; predY = state.y; predVelY = state.velY;
   }
 
   function updateSelf(p) {
@@ -615,6 +708,8 @@ function startGame(code, name) {
       right: active && !!keys["KeyD"],
       fire: shooting,
       reload: active && !!keys["KeyR"],
+      sprint: active && (!!keys["ShiftLeft"] || !!keys["ShiftRight"]),
+      jump: active && !!keys["Space"],
       yaw,
       pitch,
       seq: ++inputSeq,
@@ -623,7 +718,7 @@ function startGame(code, name) {
     };
 
     // Predict immediately for instant, smooth local movement.
-    if (predInit) ({ x: predX, z: predZ } = simulateMove(predX, predZ, input));
+    if (predInit) ({ x: predX, z: predZ, y: predY, velY: predVelY } = simulateMovement({ x: predX, z: predZ, y: predY, velY: predVelY }, input));
     pendingInputs.push({ seq: input.seq, input });
 
     ws.send(JSON.stringify({ type: "input", ...input }));
@@ -682,7 +777,7 @@ function startGame(code, name) {
     // Looking is local & instant. Babylon UniversalCamera uses Euler (pitch, yaw, roll).
     camera.rotation.set(pitch, yaw, 0);
     // Our own position comes from client-side prediction (smooth at full framerate).
-    if (predInit) camera.position.set(predX, EYE_HEIGHT, predZ);
+    if (predInit) camera.position.set(predX, predY + EYE_HEIGHT, predZ);
 
     interpolateOthers();
 
@@ -748,7 +843,8 @@ function startGame(code, name) {
     return a + d * f;
   }
 
-  // Project each visible player's head position to screen space and place its name tag there.
+  // Project each visible, unobstructed player's head position to screen space and place its
+  // name tag there.
   function updateNametags() {
     const rect = canvas.getBoundingClientRect();
     const viewport = new BABYLON.Viewport(0, 0, rect.width, rect.height);
@@ -757,7 +853,13 @@ function startGame(code, name) {
     for (const [id, mesh] of others) {
       const tag = tags.get(id);
       if (!tag || tag.style.display === "none") continue;
-      const head = new BABYLON.Vector3(mesh.position.x, mesh.position.y + 1.1, mesh.position.z);
+
+      if (lineOfSightBlocked(camera.position.x, camera.position.z, mesh.position.x, mesh.position.z)) {
+        tag.style.visibility = "hidden";
+        continue;
+      }
+
+      const head = new BABYLON.Vector3(mesh.position.x, mesh.position.y + PLAYER_HEIGHT + 0.15, mesh.position.z);
       // Hide when behind the camera.
       if (BABYLON.Vector3.Dot(head.subtract(camera.position), forward) <= 0) {
         tag.style.visibility = "hidden";

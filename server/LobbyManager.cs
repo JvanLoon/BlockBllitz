@@ -4,7 +4,7 @@ using System.Text;
 namespace BlockBlitz.Server;
 
 /// <summary>DTO for the server browser list.</summary>
-public readonly record struct LobbySummary(string Code, string Name, int Count, int MaxPlayers);
+public readonly record struct LobbySummary(string Code, string Name, int Count, int MaxPlayers, string MapId, string MapName);
 
 /// <summary>
 /// Owns every live <see cref="Lobby"/>: creates them on demand (one background tick loop
@@ -41,7 +41,7 @@ public sealed class LobbyManager : BackgroundService
     }
 
     /// <summary>Creates and starts a new lobby, or returns null if the server is at its lobby cap.</summary>
-    public Lobby? CreateLobby(string? requestedName, int requestedMaxPlayers)
+    public Lobby? CreateLobby(string? requestedName, int requestedMaxPlayers, string? mapId)
     {
         if (_lobbies.Count >= MaxLobbies) return null;
 
@@ -52,7 +52,7 @@ public sealed class LobbyManager : BackgroundService
         var code = GenerateCode();
         if (code is null) return null; // exhausted attempts (extremely unlikely at 32^5 codes)
 
-        return StartLobby(code, name, maxPlayers, permanent: false);
+        return StartLobby(code, name, maxPlayers, Maps.Get(mapId).Id, permanent: false);
     }
 
     /// <summary>
@@ -60,12 +60,12 @@ public sealed class LobbyManager : BackgroundService
     /// once at startup for the default public arena. Unlike <see cref="CreateLobby"/>, the
     /// caller picks the join code (so it can be a short, memorable, documented constant).
     /// </summary>
-    public Lobby CreateManagedLobby(string code, string name, int? maxPlayers = null) =>
-        StartLobby(code, name, maxPlayers ?? _maxPlayersCap, permanent: true);
+    public Lobby CreateManagedLobby(string code, string name, string mapId, int? maxPlayers = null) =>
+        StartLobby(code, name, maxPlayers ?? _maxPlayersCap, mapId, permanent: true);
 
-    private Lobby StartLobby(string code, string name, int maxPlayers, bool permanent)
+    private Lobby StartLobby(string code, string name, int maxPlayers, string mapId, bool permanent)
     {
-        var lobby = new Lobby(code, name, maxPlayers, _loggerFactory.CreateLogger($"Lobby[{code}]"));
+        var lobby = new Lobby(code, name, maxPlayers, mapId, _loggerFactory.CreateLogger($"Lobby[{code}]"));
         var cts = new CancellationTokenSource();
         _lobbies[code] = new Entry { Lobby = lobby, Cts = cts, Permanent = permanent };
 
@@ -89,7 +89,7 @@ public sealed class LobbyManager : BackgroundService
     /// <summary>Snapshot of every live lobby, for the server browser.</summary>
     public LobbySummary[] ListLobbies() =>
         _lobbies.Values
-            .Select(e => new LobbySummary(e.Lobby.Code, e.Lobby.Name, e.Lobby.PlayerCount, e.Lobby.MaxPlayers))
+            .Select(e => new LobbySummary(e.Lobby.Code, e.Lobby.Name, e.Lobby.PlayerCount, e.Lobby.MaxPlayers, e.Lobby.MapId, e.Lobby.MapName))
             .OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase)
             .ToArray();
 

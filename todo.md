@@ -86,11 +86,11 @@ bolt-on later instead of a rewrite.
       arm player silhouette sized to match the server hitbox exactly.
 - [x] Weapon pickups — players now start with only a knife (melee, infinite ammo, always
       owned, weapon slot 0). Pistol/SMG/Rifle/Shotgun are gained by walking within ~1.1u of
-      a fixed map location (`Arena.WeaponPickups`), shown as a glowing disc with a
-      slow-spinning copy of the weapon floating above it (reuses `buildWeaponMesh`) so it's
-      obvious what's on offer. Picking one up marks it unavailable for 25s (`server/
-      GameServer.cs`); ownership persists across respawns; the server rejects switching to
-      an unowned weapon. Keys are now 1-5 (knife first).
+      a fixed map location (`MapDef.WeaponPickups`, see `server/Maps.cs`), shown as a
+      glowing disc with a slow-spinning copy of the weapon floating above it (reuses
+      `buildWeaponMesh`) so it's obvious what's on offer. Picking one up marks it
+      unavailable for 25s (`server/Lobby.cs`); ownership persists across respawns; the
+      server rejects switching to an unowned weapon. Keys are now 1-5 (knife first).
 - [ ] Game modes (TDM, FFA, rounds)
 - [x] Simple lobby / room codes for private matches — on load: pick a name, then a server
       browser (`client/lobby.js`). Create a lobby (name + max players up to 16) with a
@@ -109,4 +109,27 @@ bolt-on later instead of a rewrite.
       de facto main menu). A server-managed "Public Arena" lobby (fixed code `PUBLIC`) is
       created at startup and is exempt from the empty-lobby sweep, so there's always
       somewhere to play immediately.
+- [x] Name tags no longer show through walls — client does a 2D line-of-sight check
+      (`lineOfSightBlocked` in `client/game.js`) against the same obstacle list used for
+      collision before drawing a tag.
+- [x] Sprint (Shift) and jump (Space) — server-authoritative (`server/Lobby.cs`): sprint is
+      a 1.6x move-speed multiplier while held, jump is real gravity + vertical velocity
+      (tuned so a standing jump apexes ~2.08u). This required `Player.Y` to become a real,
+      physically-simulated feet height (was previously a fixed cosmetic constant) — hitscan
+      eye/hitbox height and lag-compensation history are now relative to it, so shooting a
+      jumping or elevated target is accurate. Obstacles gained a `Climbable` flag: climbable
+      ones block like a solid wall below their roof height but can be jumped onto and walked
+      around freely on top (with a forgiving landing margin so jumping from right at the
+      wall reliably lands you on the roof instead of missing the ledge). Client prediction
+      mirrors the same physics exactly (`simulateMovement` in `client/game.js`) so jumping
+      feels instant, not laggy.
+- [x] Player model resized to match the viewmodel/eye height — was ~1.0 units tall (visibly
+      short next to a 1.6-unit eye height), now 1.6 (`PlayerHeight` in `server/Lobby.cs`,
+      matched exactly by the client's third-person mesh proportions and hitbox).
+- [x] New map + map selection — `server/Maps.cs` now holds a small registry (`Maps.All`)
+      instead of one hardcoded arena. Added "Towers & House": 4x the linear size of the
+      original (160x160), a tall solid tower in each corner, and one climbable house in the
+      middle (see the jump entry above). The original map is unchanged and is always what
+      the public lobby uses. The create-lobby form has a map dropdown (`GET /api/maps`), and
+      the server browser's lobby list shows each lobby's map.
 - [ ] Spectator mode

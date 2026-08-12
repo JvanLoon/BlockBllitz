@@ -13,6 +13,7 @@ const nameContinueBtn = document.getElementById("nameContinueBtn");
 const browserScreen = document.getElementById("browserScreen");
 const changeNameLink = document.getElementById("changeNameLink");
 const createNameInput = document.getElementById("createNameInput");
+const createMapInput = document.getElementById("createMapInput");
 const createMaxInput = document.getElementById("createMaxInput");
 const createBtn = document.getElementById("createBtn");
 const lobbyListBody = document.getElementById("lobbyListBody");
@@ -23,6 +24,17 @@ const joinError = document.getElementById("joinError");
 
 let myName = "";
 let pollTimer = 0;
+
+// Populate the map dropdown once; the list is static for the server's lifetime.
+fetch("/api/maps").then((r) => r.json()).then((maps) => {
+  createMapInput.innerHTML = "";
+  for (const m of maps) {
+    const opt = document.createElement("option");
+    opt.value = m.id;
+    opt.textContent = m.name;
+    createMapInput.appendChild(opt);
+  }
+}).catch(() => { /* dropdown just stays empty; server default (classic) still applies */ });
 
 // ---- Step 1: name -----------------------------------------------------------
 //
@@ -92,9 +104,10 @@ async function refreshLobbies() {
   for (const lobby of list) {
     const tr = document.createElement("tr");
     const name = document.createElement("td"); name.textContent = lobby.name;
+    const map = document.createElement("td"); map.className = "map"; map.textContent = lobby.mapName || "";
     const count = document.createElement("td"); count.textContent = `${lobby.count}/${lobby.maxPlayers}`;
     const code = document.createElement("td"); code.className = "code"; code.textContent = lobby.code;
-    tr.append(name, count, code);
+    tr.append(name, map, count, code);
     tr.addEventListener("click", () => joinLobby(lobby.code));
     lobbyListBody.appendChild(tr);
   }
@@ -103,13 +116,14 @@ async function refreshLobbies() {
 createBtn.addEventListener("click", async () => {
   const name = createNameInput.value.trim() || "Lobby";
   const maxPlayers = Math.min(16, Math.max(2, parseInt(createMaxInput.value, 10) || 8));
+  const mapId = createMapInput.value || undefined;
   createBtn.disabled = true;
   joinError.textContent = "";
   try {
     const res = await fetch("/api/lobbies", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, maxPlayers }),
+      body: JSON.stringify({ name, maxPlayers, mapId }),
     });
     if (!res.ok) { joinError.textContent = "Couldn't create a lobby right now — try again."; return; }
     const created = await res.json();

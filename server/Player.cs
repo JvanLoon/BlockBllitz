@@ -16,10 +16,14 @@ public sealed class Player
     public required string Id { get; init; }
     public required WebSocket Socket { get; init; }
 
-    // World position (Y is fixed for now — flat arena).
+    // World position. Y is the height of the player's FEET — 0 on flat ground, or higher
+    // while jumping/standing on a climbable obstacle (see Lobby.SurfaceHeightAt). Eye height
+    // and the hitbox are both relative to this, so combat tracks jumping/elevation correctly.
     public float X;
-    public float Y = 0.5f;
+    public float Y;
     public float Z;
+    public float VelY;      // vertical velocity, u/s (gravity/jump)
+    public bool Grounded = true;
 
     // Orientation the player last reported (used for movement direction and aiming).
     public float Yaw;
@@ -39,7 +43,7 @@ public sealed class Player
     public uint RespawnTick;     // tick at which a dead player respawns
 
     // Loadout: everyone starts with just the knife; guns are gained by walking over a
-    // weapon pickup (see Arena.WeaponPickups) and kept across respawns once owned.
+    // weapon pickup (see the lobby's MapDef.WeaponPickups) and kept across respawns once owned.
     public int WeaponIndex;
     public readonly bool[] Owned = CreateOwned();
     public readonly int[] Ammo = new int[Weapons.All.Length];
@@ -68,5 +72,5 @@ public sealed class Player
     public uint AckSeq;
 
     /// <summary>Position history for lag compensation, indexed by (tick % HistorySize).</summary>
-    public readonly (uint Tick, float X, float Z)[] Hist = new (uint, float, float)[HistorySize];
+    public readonly (uint Tick, float X, float Z, float Y)[] Hist = new (uint, float, float, float)[HistorySize];
 }

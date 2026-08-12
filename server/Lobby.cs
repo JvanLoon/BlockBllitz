@@ -6,8 +6,8 @@ using System.Text.Json;
 namespace BlockBlitz.Server;
 
 /// <summary>
-/// One independent match: an authoritative simulation with its own players and tick loop.
-/// The server can run many of these concurrently (see <see cref="LobbyManager"/>) — a
+/// One independent match: an authoritative simulation with its own players, map, and tick
+/// loop. The server can run many of these concurrently (see <see cref="LobbyManager"/>) — a
 /// lobby is created on demand and torn down once empty. Holds all connected players, runs
 /// a fixed-timestep simulation on a background loop, and broadcasts world snapshots to
 /// every client in it.
@@ -23,27 +23,31 @@ public sealed class Lobby
     // once that lands this can drop back to ~30Hz to save bandwidth.
     public const int SendRate = 60;   // state broadcasts per second
 
-    private const float MoveSpeed = 6f;    // world units per second
-    private const float ArenaHalf = 19f;   // arena is 40x40, keep players just inside
+    private const float MoveSpeed = 6f;     // world units per second
+    private const float SprintMult = 1.6f;  // Shift-held speed multiplier
+
+    // Vertical movement. JumpSpeed/Gravity are tuned so a standing jump apexes at
+    // JumpSpeed^2 / (2*Gravity) ≈ 2.08 units — comfortably over the Towers map house roof
+    // (1.8 units, see Maps.cs) but well under anything meant to stay out of reach.
+    private const float Gravity = 24f;
+    private const float JumpSpeed = 10f;
+    private const float RoofEpsilon = 0.05f; // landing tolerance so roof-edge float jitter doesn't reintroduce wall blocking
 
     // Combat tuning. Per-weapon damage/fire-rate/mag/reload live in Weapons.All.
     private const float MaxHealth = 100f;
-    private const float EyeHeight = 1.6f;      // must match the client camera height
+    private const float EyeHeight = 1.6f;      // above the player's feet (p.Y); must match the client camera
+    private const float PlayerHeight = 1.6f;   // hitbox top above p.Y — matches EyeHeight (eyes ~at head height)
     private static readonly int RespawnDelayTicks = TickRate * 2; // 2s
 
     private const float PlayerRadius = 0.4f;   // used for obstacle collision
-
-    // Player hit box: axis-aligned, matching the 0.8 x 1.0 x 0.8 client box (centred at y=0.5).
-    private const float BoxHalfXZ = 0.4f;
-    private const float BoxBottom = 0f;
-    private const float BoxTop = 1.0f;
+    private const float BoxHalfXZ = 0.4f;      // player hit box horizontal half-extent
 
     // Weapon pickups: walk within this radius of a pad's centre while it's available to claim
     // its gun; it then goes on cooldown and reappears later.
     private const float PickupRadius = 1.1f;
     private static readonly uint PickupRespawnTicks = TickRate * 25; // 25s
-    private readonly bool[] _pickupAvailable = Arena.WeaponPickups.Select(_ => true).ToArray();
-    private readonly uint[] _pickupRespawnTick = new uint[Arena.WeaponPickups.Length];
+    private readonly bool[] _pickupAvailable;
+    private readonly uint[] _pickupRespawnTick;
 
     private static readonly JsonSerializerOptions Json = new()
     {
@@ -57,19 +61,25 @@ public sealed class Lobby
 
     private readonly ConcurrentDictionary<string, Player> _players = new();
     private readonly ILogger _log;
+    private readonly MapDef _map;
     private uint _tick;
 
     public string Code { get; }
     public string Name { get; }
     public int MaxPlayers { get; }
+    public string MapId => _map.Id;
+    public string MapName => _map.Name;
     public int PlayerCount => _players.Count;
 
-    public Lobby(string code, string name, int maxPlayers, ILogger log)
+    public Lobby(string code, string name, int maxPlayers, string mapId, ILogger log)
     {
         Code = code;
         Name = name;
         MaxPlayers = maxPlayers;
+        _map = Maps.Get(mapId);
         _log = log;
+        _pickupAvailable = _map.WeaponPickups.Select(_ => true).ToArray();
+        _pickupRespawnTick = new uint[_map.WeaponPickups.Length];
     }
 
     // ---- Connection lifecycle -------------------------------------------------
@@ -95,7 +105,7 @@ public sealed class Lobby
         Spawn(player);
 
         // Send the welcome BEFORE registering the player, so this send can't race with the
-        // tick loop's broadcasts (which only touch registered players). Includes the arena
+        // tick loop's broadcasts (which only touch registered players). Includes the map
         // layout so the client renders identical cover.
         await SendJson(socket, new
         {
@@ -103,14 +113,21 @@ public sealed class Lobby
             id = player.Id,
             lobbyCode = Code,
             lobbyName = Name,
+            mapId = _map.Id,
+            mapName = _map.Name,
             tickRate = TickRate,
             sendRate = SendRate,
-            arenaHalf = ArenaHalf,
+            arenaHalf = _map.ArenaHalf,
             moveSpeed = MoveSpeed,
+            sprintMult = SprintMult,
+            gravity = Gravity,
+            jumpSpeed = JumpSpeed,
             playerRadius = PlayerRadius,
-            obstacles = Arena.Obstacles.Select(o => new
+            eyeHeight = EyeHeight,
+            playerHeight = PlayerHeight,
+            obstacles = _map.Obstacles.Select(o => new
             {
-                x = o.X, z = o.Z, hx = o.HalfX, hz = o.HalfZ, h = o.Height,
+                x = o.X, z = o.Z, hx = o.HalfX, hz = o.HalfZ, h = o.Height, climbable = o.Climbable,
             }).ToArray(),
             weapons = Weapons.All.Select(w => new
             {
@@ -121,7 +138,7 @@ public sealed class Lobby
                 semiAuto = w.SemiAuto,
                 infiniteAmmo = w.InfiniteAmmo,
             }).ToArray(),
-            weaponPickups = Arena.WeaponPickups.Select(p => new { x = p.X, z = p.Z, weapon = p.Weapon }).ToArray(),
+            weaponPickups = _map.WeaponPickups.Select(p => new { x = p.X, z = p.Z, weapon = p.Weapon }).ToArray(),
         }, ct);
 
         _players[player.Id] = player;
@@ -236,8 +253,8 @@ public sealed class Lobby
         const float dt = 1f / TickRate;
         int ticksPerSend = TickRate / SendRate;
 
-        _log.LogInformation("Lobby {Code} '{Name}' started at {TickRate}Hz (broadcast {SendRate}Hz, max {Max})",
-            Code, Name, TickRate, SendRate, MaxPlayers);
+        _log.LogInformation("Lobby {Code} '{Name}' started on map {Map} at {TickRate}Hz (broadcast {SendRate}Hz, max {Max})",
+            Code, Name, _map.Id, TickRate, SendRate, MaxPlayers);
 
         try
         {
@@ -262,7 +279,7 @@ public sealed class Lobby
     {
         var hitShooters = new List<Player>();
 
-        for (int i = 0; i < Arena.WeaponPickups.Length; i++)
+        for (int i = 0; i < _map.WeaponPickups.Length; i++)
             if (!_pickupAvailable[i] && _tick >= _pickupRespawnTick[i]) _pickupAvailable[i] = true;
 
         foreach (var p in _players.Values)
@@ -276,7 +293,7 @@ public sealed class Lobby
                 p.AckSeq = qi.Seq;
                 p.Yaw = qi.Yaw;
                 p.Pitch = qi.Pitch;
-                if (p.Alive) MovePlayer(p, qi, dt);
+                if (p.Alive) { UpdateVertical(p, qi, dt); MovePlayer(p, qi, dt); }
                 applied++;
             }
 
@@ -289,10 +306,10 @@ public sealed class Lobby
             }
 
             // Weapon pickups: claim any available pad within reach, granting that gun.
-            for (int i = 0; i < Arena.WeaponPickups.Length; i++)
+            for (int i = 0; i < _map.WeaponPickups.Length; i++)
             {
                 if (!_pickupAvailable[i]) continue;
-                var pu = Arena.WeaponPickups[i];
+                var pu = _map.WeaponPickups[i];
                 float dx = p.X - pu.X, dz = p.Z - pu.Z;
                 if (dx * dx + dz * dz > PickupRadius * PickupRadius) continue;
                 if (p.Owned[pu.Weapon]) continue; // already carrying it — leave it for someone else
@@ -348,25 +365,50 @@ public sealed class Lobby
         return hitShooters;
     }
 
-    private void RecordHistory(Player p) => p.Hist[_tick % Player.HistorySize] = (_tick, p.X, p.Z);
+    private void RecordHistory(Player p) => p.Hist[_tick % Player.HistorySize] = (_tick, p.X, p.Z, p.Y);
 
     /// <summary>Rewinds a target to the fractional tick the shooter was rendering it at (lag comp).</summary>
-    private (float X, float Z) RewindTarget(Player t, float renderTick)
+    private (float X, float Z, float Y) RewindTarget(Player t, float renderTick)
     {
         // Fall back to the live position when the client didn't send a usable render tick.
-        if (renderTick <= 0f || renderTick >= _tick) return (t.X, t.Z);
+        if (renderTick <= 0f || renderTick >= _tick) return (t.X, t.Z, t.Y);
 
         int t0 = (int)MathF.Floor(renderTick);
         int t1 = t0 + 1;
         var r0 = t.Hist[((t0 % Player.HistorySize) + Player.HistorySize) % Player.HistorySize];
         var r1 = t.Hist[((t1 % Player.HistorySize) + Player.HistorySize) % Player.HistorySize];
-        if (r0.Tick != (uint)t0) return (t.X, t.Z);   // history rolled over / too old
-        if (r1.Tick != (uint)t1) return (r0.X, r0.Z); // no next sample yet
+        if (r0.Tick != (uint)t0) return (t.X, t.Z, t.Y);   // history rolled over / too old
+        if (r1.Tick != (uint)t1) return (r0.X, r0.Z, r0.Y); // no next sample yet
         float f = renderTick - t0;
-        return (r0.X + (r1.X - r0.X) * f, r0.Z + (r1.Z - r0.Z) * f);
+        return (r0.X + (r1.X - r0.X) * f, r0.Z + (r1.Z - r0.Z) * f, r0.Y + (r1.Y - r0.Y) * f);
     }
 
-    private static void MovePlayer(Player p, InputMessage inp, float dt)
+    /// <summary>Gravity + jump. Runs before MovePlayer each input so horizontal collision
+    /// (which is height-aware for climbable obstacles) sees this tick's up-to-date Y.</summary>
+    private void UpdateVertical(Player p, InputMessage inp, float dt)
+    {
+        float surface = SurfaceHeightAt(p.X, p.Z);
+        p.VelY -= Gravity * dt;
+        p.Y += p.VelY * dt;
+        if (p.Y <= surface)
+        {
+            p.Y = surface;
+            p.VelY = 0f;
+            p.Grounded = true;
+        }
+        else
+        {
+            p.Grounded = false;
+        }
+        // Holding Space chains jumps automatically on landing — no edge detection needed.
+        if (inp.Jump && p.Grounded)
+        {
+            p.VelY = JumpSpeed;
+            p.Grounded = false;
+        }
+    }
+
+    private void MovePlayer(Player p, InputMessage inp, float dt)
     {
         float mx = (inp.Right ? 1f : 0f) - (inp.Left ? 1f : 0f);
         float mz = (inp.Fwd ? 1f : 0f) - (inp.Back ? 1f : 0f);
@@ -379,29 +421,65 @@ public sealed class Lobby
         float len = MathF.Sqrt(dx * dx + dz * dz);
         dx /= len; dz /= len;
 
+        float speed = inp.Sprint ? MoveSpeed * SprintMult : MoveSpeed;
+        float half = _map.ArenaHalf;
+
         // Axis-separated resolution so players slide along cover instead of sticking.
-        float nx = Math.Clamp(p.X + dx * MoveSpeed * dt, -ArenaHalf, ArenaHalf);
-        if (!BlockedAt(nx, p.Z)) p.X = nx;
-        float nz = Math.Clamp(p.Z + dz * MoveSpeed * dt, -ArenaHalf, ArenaHalf);
-        if (!BlockedAt(p.X, nz)) p.Z = nz;
+        float nx = Math.Clamp(p.X + dx * speed * dt, -half, half);
+        if (!BlockedAt(nx, p.Z, p.Y)) p.X = nx;
+        float nz = Math.Clamp(p.Z + dz * speed * dt, -half, half);
+        if (!BlockedAt(p.X, nz, p.Y)) p.Z = nz;
     }
 
-    /// <summary>True if a player centred at (x,z) would overlap any obstacle (inflated by radius).</summary>
-    private static bool BlockedAt(float x, float z)
+    /// <summary>
+    /// True if a player centred at (x,z) at height y would overlap any obstacle (inflated by
+    /// radius). Climbable obstacles only block while below their roof — at or above it, you're
+    /// standing on top and free to walk around.
+    /// </summary>
+    private bool BlockedAt(float x, float z, float y)
     {
-        foreach (var o in Arena.Obstacles)
+        foreach (var o in _map.Obstacles)
         {
-            if (x > o.X - o.HalfX - PlayerRadius && x < o.X + o.HalfX + PlayerRadius &&
-                z > o.Z - o.HalfZ - PlayerRadius && z < o.Z + o.HalfZ + PlayerRadius)
-                return true;
+            bool overlapsXZ = x > o.X - o.HalfX - PlayerRadius && x < o.X + o.HalfX + PlayerRadius &&
+                               z > o.Z - o.HalfZ - PlayerRadius && z < o.Z + o.HalfZ + PlayerRadius;
+            if (!overlapsXZ) continue;
+            if (o.Climbable && y >= o.Height - RoofEpsilon) continue;
+            return true;
         }
         return false;
+    }
+
+    // Extra margin (beyond the wall-blocking footprint) that counts as "landed on the roof".
+    // Without this, the standable zone and the solid wall share the exact same edge — jumping
+    // from right against the wall (where BlockedAt stops horizontal approach in the first
+    // place) leaves ~no room to clear the ledge before gravity pulls you back down just
+    // outside the footprint. This gives jumping onto a climbable roof real forgiveness.
+    private const float LandingMargin = 0.6f;
+
+    /// <summary>The standing height at (x,z): 0 on flat ground, or a climbable obstacle's
+    /// height if (x,z) is over (or just at the edge of) its roof (used for gravity/landing
+    /// and jump eligibility).</summary>
+    private float SurfaceHeightAt(float x, float z)
+    {
+        float surface = 0f;
+        foreach (var o in _map.Obstacles)
+        {
+            if (!o.Climbable) continue;
+            float pad = PlayerRadius + LandingMargin;
+            if (x > o.X - o.HalfX - pad && x < o.X + o.HalfX + pad &&
+                z > o.Z - o.HalfZ - pad && z < o.Z + o.HalfZ + pad)
+                surface = MathF.Max(surface, o.Height);
+        }
+        return surface;
     }
 
     private void Spawn(Player p)
     {
         var (sx, sz) = PickSpawn(p);
         p.X = sx; p.Z = sz;
+        p.Y = 0f;
+        p.VelY = 0f;
+        p.Grounded = true;
         p.Health = MaxHealth;
         // Full ammo in every weapon's mag; WeaponIndex is intentionally preserved across
         // respawns so a player keeps whatever they had equipped.
@@ -415,7 +493,7 @@ public sealed class Lobby
     {
         float best = -1f;
         var candidates = new List<(float, float)>();
-        foreach (var sp in Arena.SpawnPoints)
+        foreach (var sp in _map.SpawnPoints)
         {
             float nearestSq = float.MaxValue;
             foreach (var q in _players.Values)
@@ -487,11 +565,11 @@ public sealed class Lobby
         float sy = MathF.Sin(yaw), cy = MathF.Cos(yaw);
         float dx = cp * sy, dy = -sp, dz = cp * cy;
 
-        float ox = shooter.X, oy = EyeHeight, oz = shooter.Z;
+        float ox = shooter.X, oy = shooter.Y + EyeHeight, oz = shooter.Z;
 
         // A shot can't pass through cover: the nearest wall along the ray caps the reach.
         float best = range;
-        foreach (var o in Arena.Obstacles)
+        foreach (var o in _map.Obstacles)
         {
             if (RayAabb(ox, oy, oz, dx, dy, dz,
                         o.X - o.HalfX, 0f, o.Z - o.HalfZ,
@@ -504,12 +582,13 @@ public sealed class Lobby
         {
             if (ReferenceEquals(t, shooter) || !t.Alive) continue;
 
-            // Lag compensation: test against where the shooter actually saw the target.
-            var (tx, tz) = RewindTarget(t, renderTick);
+            // Lag compensation: test against where the shooter actually saw the target
+            // (including their vertical position, so hitting a jumping target is accurate).
+            var (tx, tz, ty) = RewindTarget(t, renderTick);
 
             if (RayAabb(ox, oy, oz, dx, dy, dz,
-                        tx - BoxHalfXZ, BoxBottom, tz - BoxHalfXZ,
-                        tx + BoxHalfXZ, BoxTop, tz + BoxHalfXZ,
+                        tx - BoxHalfXZ, ty, tz - BoxHalfXZ,
+                        tx + BoxHalfXZ, ty + PlayerHeight, tz + BoxHalfXZ,
                         out float dist) && dist < best)
             {
                 best = dist;   // closer players also occlude players behind them
@@ -576,7 +655,7 @@ public sealed class Lobby
             {
                 id = p.Id,
                 name = p.Name,
-                x = p.X, y = p.Y, z = p.Z,
+                x = p.X, y = p.Y, z = p.Z, vy = p.VelY,
                 yaw = p.Yaw, pitch = p.Pitch,
                 hp = p.Health, alive = p.Alive,
                 ammo = p.CurrentAmmo, reloading = p.Reloading, weapon = p.WeaponIndex, owned = p.Owned,

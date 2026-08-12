@@ -87,11 +87,11 @@
     }
     .panel.wide { width: min(560px, 90vw); }
     .panel label { font: 600 12px system-ui, sans-serif; letter-spacing: 2px; color: #7f9bc4; }
-    .panel input {
+    .panel input, .panel select {
       padding: 10px 12px; font: 600 18px system-ui, sans-serif; text-align: center;
       color: #eaf2ff; background: #0b1020; border: 1px solid #2b3d5c; border-radius: 8px; outline: none;
     }
-    .panel input:focus { border-color: #4f8fff; }
+    .panel input:focus, .panel select:focus { border-color: #4f8fff; }
     #playerNameInput, #joinCodeInput { width: 220px; }
     .panel button.primary {
       padding: 10px 44px; font: 800 18px system-ui, sans-serif; letter-spacing: 2px;
@@ -114,9 +114,11 @@
     }
     #changeNameLink:hover { color: #b7cbe8; }
     .browserRow { display: flex; gap: 8px; width: 100%; align-items: center; }
-    .browserRow input[type="text"], .browserRow input[type="number"] { flex: 1; min-width: 0; }
-    .browserRow input[type="number"] { flex: 0 0 70px; }
+    .browserRow input[type="text"] { flex: 1; min-width: 0; }
+    .browserRow select { flex: 0 0 150px; font-size: 14px !important; padding: 10px 6px !important; }
+    .browserRow input[type="number"] { flex: 0 0 60px; }
     .browserRow button { flex: 0 0 auto; }
+    #lobbyList td.map { color: #9fb4d6; font-size: 13px; }
     #createBtn, #joinCodeBtn {
       padding: 10px 18px; font: 800 14px system-ui, sans-serif; letter-spacing: 1px;
       color: #04121f; background: #5fd0ff; border: none; border-radius: 8px; cursor: pointer;
@@ -196,7 +198,8 @@
     <div class="panel">
       <div id="overlayLobbyInfo"></div>
       <button id="playBtn" class="primary">PLAY</button>
-      <small>WASD move · mouse look · click attack · 1-5 weapon · R reload · Tab scores · Esc release</small>
+      <small>WASD move · Shift sprint · Space jump · mouse look · click attack</small>
+      <small>1-5 weapon · R reload · Tab scores · Esc release</small>
       <small>Starts with a knife — pick up guns from the glowing pads on the map</small>
       <a id="leaveLobbyLink">Leave lobby</a>
     </div>
@@ -221,6 +224,7 @@
 
       <div class="browserRow">
         <input id="createNameInput" type="text" placeholder="Lobby name" maxlength="24" autocomplete="off" />
+        <select id="createMapInput" title="Map"></select>
         <input id="createMaxInput" type="number" min="2" max="16" value="8" title="Max players" />
         <button id="createBtn">CREATE</button>
       </div>
@@ -229,7 +233,7 @@
 
       <div id="lobbyListWrap">
         <table id="lobbyList">
-          <thead><tr><th>Lobby</th><th>Players</th><th>Code</th></tr></thead>
+          <thead><tr><th>Lobby</th><th>Map</th><th>Players</th><th>Code</th></tr></thead>
           <tbody id="lobbyListBody"></tbody>
         </table>
         <div id="lobbyListEmpty">No lobbies yet — create one above.</div>
